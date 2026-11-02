@@ -1,0 +1,5 @@
+[Public]
+
+[MutSmurfHunter]
+FriendlyName="SmurfHunter"
+Description="Alias registry: records every player's name history by CD-key ID and answers 'mutate whois <partial name>'. Server-side, zero client impact."
