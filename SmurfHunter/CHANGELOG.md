@@ -1,5 +1,22 @@
 # Changelog - SmurfHunter
 
+## v1.2.0 (2026-11-02)
+Corresponds to internal build v3.02.
+
+- **Console-only commands** - the v1.1.0 plain-chat experiment is removed: `SmurfSayHandler` is gone,
+  no broadcast handler is registered in the engine chain, and every command is `mutate`-prefixed
+  again (`mutate whois <name>` / `mutate whoare` / `mutate smurfstats`). The mutator remains pure
+  server-side with zero client downloads.
+- **Ambiguous offline `whois` now prints every match in full** - if nobody connected matches the
+  query but several stored game IDs do, each matching game ID gets its own full record block
+  (first-seen + complete alias history, wrapped like the single-match reply), separated by `---`,
+  uncapped. A player matching the query **on the server** still answers with that player's record
+  only (priority unchanged), and ambiguous connected matches still return a candidate name list.
+- **`mutate smurfhelp`** - new command listing every command with a one-line how-to.
+- Verified: compile first-pass clean; DM-Rankin regression zero ScriptWarnings, `v3.02 active`
+  marker confirmed, `.ucl`/`.int` byte-identical to v1.1.0 (servers only need the new `.u`).
+  See the README verification log.
+
 ## v1.1.0 (2026-11-02)
 Corresponds to internal build v3.01.
 

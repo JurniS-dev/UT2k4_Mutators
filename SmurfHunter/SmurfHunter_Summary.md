@@ -10,35 +10,37 @@ Change your name mid-game, change it back, change it again — it's all logged. 
 
 ## How to use it
 
-Just type it in **chat** — press your chat key and type:
+Open the console and type:
 
 ```
-whois <name>
+mutate whois <name>
 ```
 
-That's it. No console, no `mutate` prefix — the line doesn't even show up in anyone else's chat (only you see the reply). Team-chat works too, and the console spellings (`mutate whois <name>` from the `~` console) still work exactly the same.
+That's it. The reply comes straight back to your console — private, never shown in chat, and nobody else sees that you asked.
 
-- Works with **partial names** — `whois bob` finds "BobTheSlayer".
-- Works with **any capitalization** — `whois`, `WHOIS`, `WhoIs` are all the same.
+- Works with **partial names** — `mutate whois bob` finds "BobTheSlayer".
+- Works with **any capitalization** — `mutate whois`, `MUTATE WHOIS`, `Mutate WhoIs` are all the same.
 - Works on **symbols and weird characters** in names — `Bob,Jr` and `Bob Jr` even find each other.
 - Works on **connected players and past players alike** — the registry remembers.
-- The reply is **private** — only you see it, nobody else in chat.
+- The reply is **private** — only you see it.
 
-If your search matches several players, you'll get a candidate list — just retype with more of the name.
+Who you get: if a player matching the name is **on the server right now**, you get their record and only theirs. If nobody connected matches but several stored records do, you get the **full name history of every matching player**, one block each — just retype with more of the name to narrow it down.
 
 Example output: someone whois-able under `ProGamer` might turn out to also be `xX_Slayer_Xx`, `N00bDestroyer`, and `TotallyNewHere` — one player, four names, caught.
 
-There are also two more commands, same plain-chat style:
+There are also three more commands, same style:
 
 ```
-whoare
-smurfstats
+mutate whoare
+mutate smurfstats
+mutate smurfhelp
 ```
 
-- **`whoare`** lists **every other player currently on the server** with their full name history, in one go — no need to whois each person one at a time. (You're skipped — you already know your own aliases.)
-- **`smurfstats`** just tells you how many players the server's registry has seen so far.
+- **`mutate whoare`** lists **every other player currently on the server** with their full name history, in one go — no need to whois each person one at a time. (You're skipped — you already know your own aliases.)
+- **`mutate smurfstats`** just tells you how many players the server's registry has seen so far.
+- **`mutate smurfhelp`** prints the command list in-game, in case you forget any of this.
 
-All three work in any capitalization, in say or team-chat.
+All of them work in any capitalization.
 
 ## What it catches (and what it doesn't)
 
@@ -58,10 +60,10 @@ All three work in any capitalization, in say or team-chat.
 
 - **Zero performance impact.** It's a once-per-second background check that costs microseconds, and lookups are instant memory reads. No bandwidth touches the game ports. Players cannot perceive it, period.
 - **Nothing to download or install for players.** It's entirely server-side — you don't need the package, it never gets pushed to your client.
-- **No special rights needed.** Any player can use `whois` and `smurfstats` — no admin login.
+- **No special rights needed.** Any player can use `mutate whois` and the other commands — no admin login.
 - **Server fleets can share one database.** Multiple servers can sync their registries through a central hub, so a name spotted on one server in the cluster is whois-able from all of them, live. Individual server operators can even link their databases with each other (opt-in, per-partner), so a smurf who hops communities gets recognized anyway. Each server still keeps its own full copy, so everything keeps working even if the network link drops.
 - **Junk entries are ignored.** Server owners can maintain ignore lists so panel-monitor connections and other fake records never enter the database.
 
 ## TL;DR
 
-Type `whois <name>` in chat. If that "new guy" has three other names in the registry, you'll know immediately. Type `whoare` to check the whole server at once. That's the whole trick — and it's why smurfing on servers running SmurfHunter is basically pointless.
+Type `mutate whois <name>` in the console. If that "new guy" has three other names in the registry, you'll know immediately. Type `mutate whoare` to check the whole server at once, and `mutate smurfhelp` if you forget the commands. That's the whole trick — and it's why smurfing on servers running SmurfHunter is basically pointless.
