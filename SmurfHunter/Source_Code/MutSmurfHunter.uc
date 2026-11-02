@@ -1,5 +1,5 @@
 // ===================================================================
-// SmurfHunter - MutSmurfHunter  (v3.00, hub-to-hub federation)
+// SmurfHunter - MutSmurfHunter  (v3.01 - chat commands, whoare, webadmin-junk fix)
 // Registers every connected human player and spectator by CD-key hash plus
 // all their name aliases, and answers public "mutate whois <partial name>".
 //
@@ -41,6 +41,22 @@
 //       scrubbed from the on-disk DB at startup. The federated-data safety
 //       net: a poisoned or junk record cannot enter from ANY peer.
 //
+// v3.01:
+//   - GetHumanPC() excludes MessagingSpectator: the webadmin console proxy
+//     (XWebAdmin.UTServerAdminSpectator, PRI named "WebAdmin") is an
+//     engine-spawned pseudo-player with an UNSTABLE per-session ID hash -
+//     v3.00 registered it as junk records. Exclusion is structural
+//     (class-based), so a REAL player named "WebAdmin" is never affected.
+//     Pair with IgnoredHashes= lines in SmurfDB.ini to purge records
+//     already on disk (startup scrub removes them; the Register() choke
+//     point means no node's copy can re-enter via union merge).
+//   - mutate whoare: every connected player + alias history in one command
+//     (the player running it is skipped).
+//   - SmurfSayHandler (registered into the engine's broadcast handler
+//     chain): 'whois <partial name>', 'whoare', 'smurfstats' as PLAIN CHAT
+//     TEXT - no 'mutate' prefix needed. Command lines are swallowed (only
+//     the sender sees the reply); all other chat passes through untouched.
+//
 // Empty config = exact v1 local-only behavior, zero network activity.
 // ===================================================================
 
@@ -77,6 +93,9 @@ var bool bSpokeConfigured;
 var array<SmurfSpoke> FedSpokes;         // outbound peer links, parallel to FederationPeers
 var array<float> FedNextReconnectAt;      // per-peer 30s backoff clock
 
+// ---- v3.01 chat hook ----
+var SmurfSayHandler ChatHook;         // plain-chat command front end (broadcast chain)
+
 function PostBeginPlay()
 {
     local int i, Scrubbed, FedCount;
@@ -88,6 +107,27 @@ function PostBeginPlay()
     // (an ignored record held by any remote node can never re-enter:
     // Register() is the single choke point for every merge source).
     Scrubbed = class'SmurfDB'.static.ScrubIgnored();
+
+    // v3.01: plain-chat commands (whois/whoare/smurfstats). Appended to the
+    // engine's broadcast handler chain; a pure pass-through for every chat
+    // line that is not one of our commands.
+    ChatHook = Spawn(class'SmurfSayHandler');
+    if (ChatHook != None)
+    {
+        ChatHook.Boss = Self;
+        if (Level.Game != None && Level.Game.BroadcastHandler != None)
+        {
+            Level.Game.BroadcastHandler.RegisterBroadcastHandler(ChatHook);
+            Log("[SmurfHunter] v3.01 chat commands active: 'whois <name>' / 'whoare' / 'smurfstats' as plain chat (or via mutate)");
+        }
+        else
+        {
+            ChatHook.Destroy();
+            ChatHook = None;
+        }
+    }
+    else
+        Log("[SmurfHunter] SmurfSayHandler spawn failed - chat commands unavailable (mutate commands still work)");
 
     bSpokeConfigured = (CentralHost != "" && CentralToken != "");
 
@@ -133,20 +173,31 @@ function PostBeginPlay()
 
     FedCount = ActivePeerCount();
     if (FedCount > 0)
-        Log("[SmurfHunter] v3.00 federation active -" @ FedCount @ "peer hub(s)");
+        Log("[SmurfHunter] v3.01 federation active -" @ FedCount @ "peer hub(s)");
     else if (bFederate)
-        Log("[SmurfHunter] v3.00 federation configured but NO usable peers");
+        Log("[SmurfHunter] v3.01 federation configured but NO usable peers");
 
     if (HubListener != None && bSpokeConfigured)
-        Log("[SmurfHunter] v3.00 active - HUB + SPOKE (unusual, but allowed); DB has" @ class'SmurfDB'.static.NumRecords() @ "record(s)");
+        Log("[SmurfHunter] v3.01 active - HUB + SPOKE (unusual, but allowed); DB has" @ class'SmurfDB'.static.NumRecords() @ "record(s)");
     else if (HubListener != None)
-        Log("[SmurfHunter] v3.00 active - CENTRAL HUB mode, TCP" @ CentralPort $ "; DB has" @ class'SmurfDB'.static.NumRecords() @ "record(s)");
+        Log("[SmurfHunter] v3.01 active - CENTRAL HUB mode, TCP" @ CentralPort $ "; DB has" @ class'SmurfDB'.static.NumRecords() @ "record(s)");
     else if (bSpokeConfigured)
-        Log("[SmurfHunter] v3.00 active - spoke mode ->" @ CentralHost $ ":" $ string(CentralPort) $ "; DB has" @ class'SmurfDB'.static.NumRecords() @ "record(s)");
+        Log("[SmurfHunter] v3.01 active - spoke mode ->" @ CentralHost $ ":" $ string(CentralPort) $ "; DB has" @ class'SmurfDB'.static.NumRecords() @ "record(s)");
     else if (FedCount > 0)
-        Log("[SmurfHunter] v3.00 active - FEDERATION node (no listener, no fleet spoke); DB has" @ class'SmurfDB'.static.NumRecords() @ "record(s)");
+        Log("[SmurfHunter] v3.01 active - FEDERATION node (no listener, no fleet spoke); DB has" @ class'SmurfDB'.static.NumRecords() @ "record(s)");
     else
-        Log("[SmurfHunter] v3.00 active - local mode; 'mutate whois <name>'; DB has" @ class'SmurfDB'.static.NumRecords() @ "record(s)");
+        Log("[SmurfHunter] v3.01 active - local mode; 'whois <name>' / 'whoare' / 'smurfstats' (plain chat or mutate); DB has" @ class'SmurfDB'.static.NumRecords() @ "record(s)");
+}
+
+// If the mutator is destroyed mid-map, the chat hook becomes a pure
+// pass-through (Boss=None). We do NOT destroy it - that would cut the
+// engine's broadcast chain at a live link; the map change rebuilds the
+// chain anyway.
+event Destroyed()
+{
+    if (ChatHook != None)
+        ChatHook.Boss = None;
+    Super.Destroyed();
 }
 
 // ------------------------- v1: capture + whois -------------------------
@@ -161,7 +212,12 @@ function PlayerController GetHumanPC(PlayerReplicationInfo PRI)
     if (PRI == None || PRI.bBot || PRI.Owner == None)
         return None;
     PC = PlayerController(PRI.Owner);
-    if (PC == None || PC.IsA('DemoRecSpectator'))
+    // v3.01: MessagingSpectator covers the webadmin console proxy
+    // (XWebAdmin.UTServerAdminSpectator, PRI named "WebAdmin") - an
+    // engine-spawned pseudo-player with an unstable per-session ID hash.
+    // Class-based exclusion means a REAL player named "WebAdmin" (a normal
+    // network PlayerController) is never caught.
+    if (PC == None || PC.IsA('DemoRecSpectator') || PC.IsA('MessagingSpectator'))
         return None;
     return PC;
 }
@@ -531,105 +587,13 @@ function ReplyRecord(PlayerController Sender, string Hash, optional string Onlin
 
 function Mutate(string MutateString, PlayerController Sender)
 {
-    local GameReplicationInfo GRI;
-    local PlayerReplicationInfo PRI;
-    local PlayerController PC;
-    local array<int> Matches;
-    local array<string> Parts;
-    local string Arg, LiveName, Line;
-    local int i, Count, HitIndex;
-
-    // our commands: "whois [name]" and "smurfstats" - everything else chains on
+    // our commands: "whois [name]", "whoare" and "smurfstats" - everything
+    // else chains on. The command cores are shared with the v3.01 chat hook,
+    // so plain chat text ('whois bob', 'whoare', 'smurfstats') works too.
     if (MutateString ~= "whois" || Left(MutateString, 6) ~= "whois ")
-    {
-        if (Sender == None)
-            return;
-
-        // take everything after the keyword, sanitize it the same way names
-        // are stored (handles symbols + trimming); matching is case-insensitive
-        Arg = class'SmurfDB'.static.SanitizeName(Mid(MutateString, 5));
-
-        if (Arg == "")
-        {
-            Sender.ClientMessage("[SmurfHunter] Usage: mutate whois <partial name>  (case-insensitive, partial names OK)");
-            return;
-        }
-
-        // route 1: connected human players - exact name match beats all partials
-        GRI = Level.Game.GameReplicationInfo;
-        Count = 0;
-        HitIndex = -1;
-        if (GRI != None)
-        {
-            for (i = 0; i < GRI.PRIArray.Length; i++)
-            {
-                PRI = GRI.PRIArray[i];
-                PC = GetHumanPC(PRI);
-                if (PC == None)
-                    continue;
-                LiveName = class'SmurfDB'.static.SanitizeName(PRI.PlayerName);
-                if (LiveName ~= Arg)
-                {
-                    Count = 1;
-                    HitIndex = i;
-                    break;
-                }
-                if (InStr(Caps(LiveName), Caps(Arg)) >= 0)
-                {
-                    Count++;
-                    HitIndex = i;
-                }
-            }
-        }
-
-        if (Count == 1)
-        {
-            PC = GetHumanPC(GRI.PRIArray[HitIndex]);
-            ReplyRecord(Sender, PC.GetPlayerIDHash(), GRI.PRIArray[HitIndex].PlayerName);
-            return;
-        }
-        if (Count > 1)
-        {
-            Line = "[SmurfHunter] Ambiguous, matching connected players:";
-            for (i = 0; i < GRI.PRIArray.Length; i++)
-            {
-                PRI = GRI.PRIArray[i];
-                PC = GetHumanPC(PRI);
-                if (PC == None)
-                    continue;
-                LiveName = class'SmurfDB'.static.SanitizeName(PRI.PlayerName);
-                if (LiveName ~= Arg || InStr(Caps(LiveName), Caps(Arg)) >= 0)
-                    Line = Line @ PRI.PlayerName $ " /";
-            }
-            if (Right(Line, 1) == "/")
-                Line = Left(Line, Len(Line) - 1);
-            Sender.ClientMessage(Line);
-            return;
-        }
-
-        // route 2: offline DB search over stored aliases
-        if (class'SmurfDB'.static.FindByAlias(Arg, Matches) == 0)
-        {
-            Sender.ClientMessage("[SmurfHunter] No records found for '" $ Arg $ "'");
-            return;
-        }
-        if (Matches.Length > 1)
-        {
-            Line = "[SmurfHunter] Ambiguous, matching records (first alias shown):";
-            for (i = 0; i < Matches.Length; i++)
-            {
-                Parts.Length = 0;
-                Split(class'SmurfDB'.static.GetAliases(Matches[i]), ",", Parts);
-                if (Parts.Length > 0)
-                    Line = Line @ Parts[0] $ " /";
-            }
-            if (Right(Line, 1) == "/")
-                Line = Left(Line, Len(Line) - 1);
-            Sender.ClientMessage(Line);
-            return;
-        }
-        ReplyRecord(Sender, class'SmurfDB'.static.GetHash(Matches[0]));
-    }
+        CmdWhoIs(Sender, class'SmurfDB'.static.SanitizeName(Mid(MutateString, 5)));
+    else if (MutateString ~= "whoare" || Left(MutateString, 7) ~= "whoare ")
+        CmdWhoAre(Sender);
     else if (MutateString ~= "smurfstats")
     {
         if (Sender != None)
@@ -637,6 +601,209 @@ function Mutate(string MutateString, PlayerController Sender)
     }
     else
         Super.Mutate(MutateString, Sender);
+}
+
+// ---------------------- v3.01: command cores ----------------------
+// whois core - shared by 'mutate whois' and plain-chat 'whois'.
+// Route 1: connected human players (exact match beats partials, then
+// partials; ambiguous -> candidate list). Route 2: offline DB alias search.
+function CmdWhoIs(PlayerController Sender, string Arg)
+{
+    local GameReplicationInfo GRI;
+    local PlayerReplicationInfo PRI;
+    local PlayerController PC;
+    local array<int> Matches;
+    local array<string> Parts;
+    local string LiveName, Line;
+    local int i, Count, HitIndex;
+
+    if (Sender == None)
+        return;
+
+    if (Arg == "")
+    {
+        Sender.ClientMessage("[SmurfHunter] Usage: whois <partial name>  (case-insensitive, partial names OK)");
+        return;
+    }
+
+    // route 1: connected human players - exact name match beats all partials
+    GRI = Level.Game.GameReplicationInfo;
+    Count = 0;
+    HitIndex = -1;
+    if (GRI != None)
+    {
+        for (i = 0; i < GRI.PRIArray.Length; i++)
+        {
+            PRI = GRI.PRIArray[i];
+            PC = GetHumanPC(PRI);
+            if (PC == None)
+                continue;
+            LiveName = class'SmurfDB'.static.SanitizeName(PRI.PlayerName);
+            if (LiveName ~= Arg)
+            {
+                Count = 1;
+                HitIndex = i;
+                break;
+            }
+            if (InStr(Caps(LiveName), Caps(Arg)) >= 0)
+            {
+                Count++;
+                HitIndex = i;
+            }
+        }
+    }
+
+    if (Count == 1)
+    {
+        PC = GetHumanPC(GRI.PRIArray[HitIndex]);
+        ReplyRecord(Sender, PC.GetPlayerIDHash(), GRI.PRIArray[HitIndex].PlayerName);
+        return;
+    }
+    if (Count > 1)
+    {
+        Line = "[SmurfHunter] Ambiguous, matching connected players:";
+        for (i = 0; i < GRI.PRIArray.Length; i++)
+        {
+            PRI = GRI.PRIArray[i];
+            PC = GetHumanPC(PRI);
+            if (PC == None)
+                continue;
+            LiveName = class'SmurfDB'.static.SanitizeName(PRI.PlayerName);
+            if (LiveName ~= Arg || InStr(Caps(LiveName), Caps(Arg)) >= 0)
+                Line = Line @ PRI.PlayerName $ " /";
+        }
+        if (Right(Line, 1) == "/")
+            Line = Left(Line, Len(Line) - 1);
+        Sender.ClientMessage(Line);
+        return;
+    }
+
+    // route 2: offline DB search over stored aliases
+    if (class'SmurfDB'.static.FindByAlias(Arg, Matches) == 0)
+    {
+        Sender.ClientMessage("[SmurfHunter] No records found for '" $ Arg $ "'");
+        return;
+    }
+    if (Matches.Length > 1)
+    {
+        Line = "[SmurfHunter] Ambiguous, matching records (first alias shown):";
+        for (i = 0; i < Matches.Length; i++)
+        {
+            Parts.Length = 0;
+            Split(class'SmurfDB'.static.GetAliases(Matches[i]), ",", Parts);
+            if (Parts.Length > 0)
+                Line = Line @ Parts[0] $ " /";
+        }
+        if (Right(Line, 1) == "/")
+            Line = Left(Line, Len(Line) - 1);
+        Sender.ClientMessage(Line);
+        return;
+    }
+    ReplyRecord(Sender, class'SmurfDB'.static.GetHash(Matches[0]));
+}
+
+// whoare core - every connected human player (players + spectators) with
+// their stored alias history, in one command. The player running it is
+// skipped: their own history is one 'whois <own name>' away. Records are
+// resolved by CD-key hash, so there is no ambiguity resolution here.
+function CmdWhoAre(PlayerController Sender)
+{
+    local GameReplicationInfo GRI;
+    local PlayerReplicationInfo PRI;
+    local PlayerController PC;
+    local int i, N;
+
+    if (Sender == None)
+        return;
+
+    GRI = Level.Game.GameReplicationInfo;
+    N = 0;
+    if (GRI != None)
+        for (i = 0; i < GRI.PRIArray.Length; i++)
+        {
+            PC = GetHumanPC(GRI.PRIArray[i]);
+            if (PC != None && PC != Sender)
+                N++;
+        }
+
+    if (N == 0)
+    {
+        Sender.ClientMessage("[SmurfHunter] No other players connected");
+        return;
+    }
+
+    Sender.ClientMessage("[SmurfHunter] Players online (" $ N $"):");
+    for (i = 0; i < GRI.PRIArray.Length; i++)
+    {
+        PRI = GRI.PRIArray[i];
+        PC = GetHumanPC(PRI);
+        if (PC == None || PC == Sender)
+            continue;
+        ReplyRecord(Sender, PC.GetPlayerIDHash(), PRI.PlayerName);
+    }
+}
+
+// Parse a raw chat line for our command keywords (v3.01). Returns true +
+// fills Cmd/Arg if the line is one of ours. Handles an optional console
+// say/teamsay prefix and outer whitespace; args get the same sanitization
+// as stored names so symbol-heavy queries match identically to 'mutate
+// whois'. Only a line STARTING with a keyword counts - mid-sentence
+// mentions never trigger.
+function bool ParseChatCommand(string Raw, out string Cmd, out string Arg)
+{
+    Cmd = "";
+    Arg = "";
+
+    while (Left(Raw, 1) == " " && Raw != "")
+        Raw = Mid(Raw, 1);
+    while (Right(Raw, 1) == " " && Raw != "")
+        Raw = Left(Raw, Len(Raw) - 1);
+    if (Raw == "")
+        return false;
+
+    // console entry: "say whois bob" / "teamsay whois bob"
+    if (Left(Caps(Raw), 4) == "SAY ")
+        Raw = TrimLead(Mid(Raw, 4));
+    else if (Left(Caps(Raw), 8) == "TEAMSAY ")
+        Raw = TrimLead(Mid(Raw, 8));
+
+    if (Raw ~= "whois" || Left(Raw, 6) ~= "whois ")
+    {
+        Cmd = "whois";
+        Arg = class'SmurfDB'.static.SanitizeName(Mid(Raw, 5));
+        return true;
+    }
+    if (Raw ~= "whoare" || Left(Raw, 7) ~= "whoare ")
+    {
+        Cmd = "whoare";
+        Arg = "";
+        return true;
+    }
+    if (Raw ~= "smurfstats")
+    {
+        Cmd = "smurfstats";
+        Arg = "";
+        return true;
+    }
+    return false;
+}
+
+function string TrimLead(string S)
+{
+    while (Left(S, 1) == " " && S != "")
+        S = Mid(S, 1);
+    return S;
+}
+
+// Shared dispatch for both entry points (mutate + plain chat).
+function RunCommand(PlayerController Sender, string Cmd, string Arg)
+{
+    if (Cmd ~= "whois")
+        CmdWhoIs(Sender, Arg);
+    else if (Cmd ~= "whoare")
+        CmdWhoAre(Sender);
+    else if (Cmd ~= "smurfstats")
+        Sender.ClientMessage("[SmurfHunter] Registry:" @ class'SmurfDB'.static.NumRecords() @ "record(s)");
 }
 
 defaultproperties

@@ -1,34 +1,38 @@
-# SmurfHunter (v3.00)
+# SmurfHunter (v3.01)
 
 Server-side UT2004 mutator that records every player's **name history keyed by their stable CD-key ID** and answers a public whois command — the "smurf detector".
 
-**Status**: v3.00 built, compiled, and verified on the OldUnreal Linux 64-bit engine (2026-11-01). v1 verified **live in production**; v2 sync layer E2E-verified headless with real sockets in BOTH directions (hub + spoke); v3 hub-to-hub federation E2E-verified live on the wire (16/16 checks, `Tools/sync_test_federation.py`), including the in-code peer source-IP check and the v2.02 ignore-list safety net. Zero ScriptWarnings in all runs.
+**Status**: v3.01 built, compiled, and verified on the OldUnreal Linux 64-bit engine (2026-11-02). v1 verified **live in production**; v2 sync layer E2E-verified headless with real sockets in BOTH directions (hub + spoke); v3 hub-to-hub federation E2E-verified live on the wire (16/16 checks, `Tools/sync_test_federation.py`), including the in-code peer source-IP check and the v2.02 ignore-list safety net. **v3.01 adds**: plain-chat commands (`whois`/`whoare`/`smurfstats` with no `mutate` prefix), the `whoare` command, and the structural webadmin-proxy exclusion (WebAdmin junk records can no longer be created; ones already on disk are purged via `IgnoredHashes`). Zero ScriptWarnings in all runs.
 
-**v1/v2 are fully live-verified**; v3 adds optional hub-to-hub federation on top. With no sync config, v3 behaves identically to v1.
+**v1/v2 are fully live-verified**; v3 adds optional hub-to-hub federation on top. With no sync config, any version behaves identically to v1 — all sync/federation is opt-in and off by default.
 
-## What it does (v1.02 — fully local, zero config)
+## What it does (v3.01 — fully local, zero config)
 
 - Detects joins, disconnects, **and renames** via a 1-second `PRIArray` diff poll (players *and* spectators).
-- **Excluded by design**: bots, and engine-spawned pseudo-players such as `DemoRecSpectator` (server-side demorec) — which is a full `PlayerController` subclass with its own PRI but no human behind it — so servers running demorec by default will not log the demo spectator (one informational log line per map; nothing enters the DB). The exclusion also covers mod subclasses of `DemoRecSpectator` via `IsA`.
+- **Excluded by design**: bots, and engine-spawned pseudo-players such as `DemoRecSpectator` (server-side demorec) and — v3.01 — `MessagingSpectator` (the webadmin console proxy, `XWebAdmin.UTServerAdminSpectator`, whose PRI is named "WebAdmin" and whose ID hash changes every webadmin session). Both are full `PlayerController` subclasses with their own PRIs but no human behind them, so servers running demorec/webadmin log nothing about them (one informational log line per map; nothing enters the DB). The exclusion is structural (`IsA`, covers mod subclasses) and can never catch a real player: someone genuinely named "WebAdmin" connects as a normal network `PlayerController` and is recorded normally.
 - Records each player's `GetPlayerIDHash()` (the engine's stable CD-key GUID hash — same ID the ban system uses) with all their aliases and a first-seen stamp to `<user dir>/System/SmurfDB.ini` (e.g. `~/.ut2004/System/SmurfDB.ini` on a Linux server — this build keeps all configs in the user-dir `System/` folder).
 - Writes to disk **only when something actually changed** (new player or new alias) — never on respawn, never mid-combat.
-- Answers, for any player (no admin rights needed):
-  - `mutate whois <partial name>` — resolves connected players first (exact match beats partial), falls back to the stored alias DB. Ambiguous queries return a candidate list. Reply is private (console message to the requester only). The raw CD-key hash is **never** shown to players.
-  - `mutate smurfstats` — current record count.
+- Answers, for any player (no admin rights needed). **v3.01: every command also works as PLAIN CHAT TEXT** — just type `whois bob` in chat (say or team-say; `say whois bob` from the bare console works too), no `mutate` prefix. Command lines are swallowed: only you see the reply, nobody else even sees your query. Only a line that *starts with* one of the three keywords counts — normal chat is never touched.
+  - `whois <partial name>` — resolves connected players first (exact match beats partial), falls back to the stored alias DB. Ambiguous queries return a candidate list. Reply is private (console message to the requester only). The raw CD-key hash is **never** shown to players.
+  - `whoare` — (v3.01) every OTHER player currently on the server (players and spectators alike) with their full alias history, in one command. The player running it is skipped — their own history is one `whois <own name>` away.
+  - `smurfstats` — current record count.
   - All other `mutate` keywords chain through untouched.
 
 **Performance**: everything is server-side and event-driven; the poll costs microseconds once per second, the whois lookup is a sub-millisecond memory scan, and no bandwidth ever touches the game ports. Players cannot perceive any of it, by construction.
 
 ## For players (in-game quickstart)
 
-Open the console and type any of these — **everything works in any capitalization** (`whois`, `WHOIS`, `WhoIs` are identical), and partial names are fine:
+Just type it in chat — **everything works in any capitalization** (`whois`, `WHOIS`, `WhoIs` are identical), and partial names are fine:
 
 ```
-mutate whois <partial name>   -- all known aliases for a player (live or from history)
-mutate smurfstats              -- how many players the registry has seen
+whois <partial name>   -- all known aliases for a player (live or from history)
+whoare                 -- every other player online, with their full alias history
+smurfstats             -- how many players the registry has seen
 ```
 
-Examples: `mutate whois bob`, `mutate WHOIS [T]Clan|Pro`, `mutate whois Bob,Jr`.
+Press the chat key and type the command — the line is swallowed (nobody else sees it) and the reply comes back only to you. Team-chat works too. The console spellings (`mutate whois …`, `mutate whoare`, `mutate smurfstats`) work identically for admins/scripts.
+
+Examples (all case-insensitive, all partial-friendly): `whois bob`, `WHOIS [T]Clan|Pro`, `whois Bob,Jr`, `whoare`, `say whois mega` from the bare console — or the `mutate`-prefixed spellings if you prefer.
 
 - The reply is **private** — only you see it.
 - If several players match, you get a candidate list — re-run with more of the name.
@@ -50,7 +54,7 @@ Examples: `mutate whois bob`, `mutate WHOIS [T]Clan|Pro`, `mutate whois Bob,Jr`.
 1. Add the mutator to the server's **startup URL** (`?Mutator=SmurfHunter.MutSmurfHunter`), not just via webadmin mid-session — webadmin additions do not survive restarts.
 2. **If you run map voting (xVoting)**, a passed vote travels to a URL built from that game config's own mutator list, and any mutator not listed there is **unloaded**. Add "SmurfHunter" to every voting game config's Mutator list. Plain map-list rotation is unaffected (it preserves the current URL options).
 
-**About the bundled `.u`**: it was compiled against the **OldUnreal 64-bit Linux engine build**. If you run a different engine version (e.g. retail 3369 or other platform builds), compile from source instead: copy all five `.uc` files from `Source_Code/` into `<game root>/SmurfHunter/Classes/`, add `EditPackages=SmurfHunter` under `[Editor.EditorEngine]` in your ini, and run `ucc make`. The source is the canonical deliverable.
+**About the bundled `.u`**: it was compiled against the **OldUnreal 64-bit Linux engine build**. If you run a different engine version (e.g. retail 3369 or other platform builds), compile from source instead: copy all six `.uc` files from `Source_Code/` into `<game root>/SmurfHunter/Classes/`, add `EditPackages=SmurfHunter` under `[Editor.EditorEngine]` in your ini, and run `ucc make`. The source is the canonical deliverable.
 
 ## Files
 
@@ -58,7 +62,8 @@ Standard mutator export layout (see the [repo README](../README.md) for the conv
 
 | Path | Purpose |
 |---|---|
-| `Source_Code/MutSmurfHunter.uc` | Mutator: capture poll, `mutate whois`/`smurfstats`, v2 sync config + v3 federation config, hub/spoke/fed-spoke orchestration, `RelayFederated` |
+| `Source_Code/MutSmurfHunter.uc` | Mutator: capture poll, command cores (`whois`/`whoare`/`smurfstats`), chat-command parser, v2 sync config + v3 federation config, hub/spoke/fed-spoke orchestration, `RelayFederated` |
+| `Source_Code/SmurfSayHandler.uc` | **v3.01** chat-command front end (hooked into the engine's broadcast-handler chain): turns `whois bob` / `whoare` / `smurfstats` typed as chat into commands, swallows the query line, replies privately; pure pass-through for everything else |
 | `Source_Code/SmurfDB.uc` | Persistent registry (`config(SmurfDB)` → `SmurfDB.ini`): hash-keyed records, comma-joined aliases, sanitizer, sync line parsing + validation, **v2.02 ignore lists** (filter + startup scrub) |
 | `Source_Code/SmurfSpoke.uc` | Outbound TcpLink client — fleet spoke **or** v3 federation link (`AUTH … LINKTYPE HUB`, relay-on-change for peer records, 30s retry backoff) |
 | `Source_Code/SmurfHubListener.uc` | Hub inbound TCP listener (binds CentralPort, spawns SmurfHubLink per connection — spokes and peers alike) |
@@ -69,11 +74,12 @@ Standard mutator export layout (see the [repo README](../README.md) for the conv
 | `Compiled/System/SmurfHunter.int` | Localization: friendly name + description for the mutator list → server game-tree `System/` |
 | `Compiled/System/SmurfDB.example.ini` | Example registry file format (fake record + ignore-list usage) → copy to the server's user-dir `System/` as `SmurfDB.ini` only when pre-seeding; otherwise the DB auto-creates on first registration |
 | `Tools/csv_to_smurfdb.py` | Reusable CSV → SmurfDB.ini converter (sanitizes like the mutator, merges shared game IDs, flags bad hashes) |
+| `Tools/json_aliases_to_smurfdb.py` | Reusable game-ID→aliases **JSON → existing SmurfDB.ini** merge tool — mirrors `SmurfDB.Register()` semantics exactly (same sanitization, case-insensitive hash lookup + alias dedupe, alias-list append-only, `FirstSeen` never overwritten), so a merged file is indistinguishable from what the engine itself would converge to; idempotent, safe against later hub sync |
 | `Tools/sync_test_hub.py` | v2 E2E test harness: fake spokes exercising a live hub (auth, sync, relay, rejection, bad-token close) |
 | `Tools/sync_fake_hub.py` | v2 E2E test harness: fake hub exercising a live spoke (outbound connect, handshake, PUSH reply, delta merge) |
 | `Tools/sync_test_federation.py` | **v3 E2E test harness**: fake peer hub + two fake spokes against a live hub+federate server (peer handshake, both-way reconciliation + relay, ignore filter, unknown-token close, source-IP-mismatch close) — 16/16 ALL PASS |
-| `SmurfHunter_Summary.md` | Player-facing summary (Discord-shareable) — what smurfing is, how to use `mutate whois` |
-| `CHANGELOG.md` | Release history (public v1.0.0 = internal build v3.00) |
+| `SmurfHunter_Summary.md` | Player-facing summary (Discord-shareable) — what smurfing is, how to use `whois`/`whoare`/`smurfstats` |
+| `CHANGELOG.md` | Release history (public releases map to internal builds: v1.0.0 = v3.00, v1.1.0 = v3.01) |
 
 ## DB format (`SmurfDB.ini` — located in the user-dir `System/` folder)
 
@@ -90,11 +96,11 @@ Records key on the CD-key hash. **Aliases are an unbounded comma-joined unique l
 
 ```ini
 [SmurfHunter.SmurfDB]
-IgnoredHashes=<32-hex cd-key hash>
-IgnoredNames=WebAdmin
+IgnoredHashes=<32-hex junk-proxy hash, one line per hash>
+IgnoredNames=<only names that can never be a real player>
 ```
 
-Records whose hash is on `IgnoredHashes`, or that carry an alias on `IgnoredNames` (case-insensitive, sanitized both sides), are **rejected at `SmurfDB.Register()` — the single choke point** every merge source passes through: local capture, spoke inbound, hub inbound, and v3 federation relay. They never touch the DB, so they are never relayed either. At startup a scrub removes any already-stored matching records — this closes the union-merge resurrection hole (a remote node still holding the record cannot push it back), **without coordinated downtime**. A name match removes the whole record (ignore lists are for junk identities, not for pruning one alias). Typical use: the WebAdmin panel-monitor junk record, or a poisoned record arriving over federation. Entries are matched per-join with a log line (bulk sync blocks log a count summary instead of one line per record).
+Records whose hash is on `IgnoredHashes`, or that carry an alias on `IgnoredNames` (case-insensitive, sanitized both sides), are **rejected at `SmurfDB.Register()` — the single choke point** every merge source passes through: local capture, spoke inbound, hub inbound, and v3 federation relay. They never touch the DB, so they are never relayed either. At startup a scrub removes any already-stored matching records — this closes the union-merge resurrection hole (a remote node still holding the record cannot push it back), **without coordinated downtime**. A name match removes the whole record (ignore lists are for junk identities, not for pruning one alias). **v3.01 — the "WebAdmin" junk record, done properly**: the webadmin console proxy is an engine-spawned pseudo-player (`MessagingSpectator`) whose ID hash changes every webadmin session — so it was being recorded as junk with a new hash each time. v3.01 excludes it STRUCTURALLY at capture time (a genuine player named "WebAdmin" is a normal network `PlayerController` and is recorded normally), so no new junk records can be created; any junk records already on disk are purged by adding their hashes to `IgnoredHashes` — the startup scrub removes them on every node and the `Register()` choke point blocks re-entry from any node still holding a copy. **Do NOT put `WebAdmin` on `IgnoredNames`**: a name match removes the whole record, so a real player who ever used that alias would lose their entire history. Prefer hashes — a real CD-key hash belongs to a real player, a junk-proxy hash belongs to no one. Typical other use for `IgnoredNames`: a poisoned record arriving over federation. Entries are matched per-join with a log line (bulk sync blocks log a count summary instead of one line per record).
 
 ## Multi-server sync (v2 — opt-in, off by default)
 
@@ -198,4 +204,5 @@ Against a live hub+federate server (hub TCP 9075 + fake peer hub on 9076 + two f
 - 2026-11-01 (v1.01 → v1.02): symbol-safe name handling — `SmurfDB.SanitizeName()` applied identically at store time and query time (commas → spaces so the alias-list delimiter can never be corrupted; quotes/control chars dropped so ini lines can never be broken; outer-trim). Whois route-1 (connected players) now compares sanitized live names, so symbol names match live and offline records identically. Command keyword + all matching were already case-insensitive (`~=` / `Caps()` everywhere) — now documented as a contract. Sanitizer edge cases validated by simulation (all pass); rebuilt via the documented stale-`.u`-first procedure; `v1.02 active` verified in the regression log. All exports in this folder are the v1.02 build.
 - 2026-11-01 (**v3.00 + v2.02 built & verified**): all five classes updated (wire protocol unchanged). `rm ~/.ut2004/System/SmurfHunter.u` → `compile_and_verify` → SUCCESS after one engine-fact fix (IpAddr struct members are `Addr`/`Port`, not `ip` — logged). Local-mode regression: `v3.00 active - local mode; 'mutate whois <name>'; DB has 27 record(s)`, zero ScriptWarnings, graceful SIGTERM. **Federation E2E** (live headless hub + fake peer hub + two fake spokes, real sockets): 16/16 ALL PASS — peer handshake (`AUTH <token> LINKTYPE HUB`), both-way reconciliation, relay up/down on the wire, no echo, startup scrub, ignore-list rejection (absent from DB, never relayed), malformed rejection, unknown-peer-token close, **source-IP-mismatch close** (in-code check). Final clean regression after config restore: local mode, 27 records, zero warnings. All exports in this folder are the v3.00 build.
 - 2026-11-01 (DB seeding): a 28-row `PLAYER,GAME ID` history CSV converted to a starting DB via the included `csv_to_smurfdb.py` — 27 records (one shared game ID merged into a single multi-alias record), symbol-heavy names preserved verbatim, all hashes valid 32-hex, `FirstSeen` = current timestamp in the mutator's exact `BuildStamp()` format ("YYYY-MM-DD hh:mm", zero-padded local time — so seeded values are byte-identical in shape to live-written ones and the real format is validated through load/rewrite/display; custom label possible via converter argv[3]). **Two config-system facts verified live during seeding** (initial seed silently ignored → diagnosed → fixed): config files live in `<user dir>/System/` (this build's search root — same folder as `UT2004.ini`), and the section must be package-qualified `[SmurfHunter.SmurfDB]`. Final regression run confirms: **"DB has 27 record(s)"** in the activation line. Logged to `failure_log.json` (2026-11-01).
-- Live whois with a human player is pending the user's first live test (join any server running it, type `mutate whois <your name>`; your own record should show up after ~1s of the poll running — pre-seeded players should be whois-able immediately via the offline DB route).
+- Live whois with a human player is pending the user's first live test (join any server running it, type `whois <your name>` in chat; your own record should show up after ~1s of the poll running — pre-seeded players should be whois-able immediately via the offline DB route).
+- 2026-11-02 (**v3.01 built & verified**): root-caused the "WebAdmin" junk record to the engine's own webadmin console proxy (`XWebAdmin.UTServerAdminSpectator` extends `Engine.MessagingSpectator` extends `PlayerController` — spawned server-side per webadmin session, PRI named "WebAdmin", unstable per-session ID hash, which is why such junk records accumulate with different hashes and hash-ignoring alone can never keep up). Fix: structural `IsA('MessagingSpectator')` exclusion in `GetHumanPC` (same proven pattern as the v1.01 demorec exclusion — catches the class and every subclass forever, independent of name/hash, and can never match a real network player) + junk records already on disk are purged by adding their hashes to `IgnoredHashes` (startup scrub removes them on every node; `Register()` blocks re-entry via sync). New features: `whoare` (every other connected player + full alias history in one command, executor skipped) and plain-chat commands via `SmurfSayHandler` (`whois <name>` / `whoare` / `smurfstats` as chat text — command lines swallowed, private reply, `say`/`teamsay` console prefixes accepted, only line-initial keywords trigger; both entry points share one command core). Build: stale-package removal first → compile SUCCESS first pass → regression DM-Rankin 20s TEST_COMPLETE with both v3.01 markers in the log, zero ScriptWarnings, graceful SIGTERM; chat-parser logic validated 23/23 edge cases (case, trims, say/teamsay prefixes, comma-alias sanitization, symbol names, mid-sentence non-triggers).

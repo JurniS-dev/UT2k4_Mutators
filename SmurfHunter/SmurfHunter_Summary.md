@@ -10,13 +10,15 @@ Change your name mid-game, change it back, change it again — it's all logged. 
 
 ## How to use it
 
-Open your console (default `~` key, or Tab) and type:
+Just type it in **chat** — press your chat key and type:
 
 ```
-mutate whois <name>
+whois <name>
 ```
 
-- Works with **partial names** — `mutate whois bob` finds "BobTheSlayer".
+That's it. No console, no `mutate` prefix — the line doesn't even show up in anyone else's chat (only you see the reply). Team-chat works too, and the console spellings (`mutate whois <name>` from the `~` console) still work exactly the same.
+
+- Works with **partial names** — `whois bob` finds "BobTheSlayer".
 - Works with **any capitalization** — `whois`, `WHOIS`, `WhoIs` are all the same.
 - Works on **symbols and weird characters** in names — `Bob,Jr` and `Bob Jr` even find each other.
 - Works on **connected players and past players alike** — the registry remembers.
@@ -26,13 +28,17 @@ If your search matches several players, you'll get a candidate list — just ret
 
 Example output: someone whois-able under `ProGamer` might turn out to also be `xX_Slayer_Xx`, `N00bDestroyer`, and `TotallyNewHere` — one player, four names, caught.
 
-There's also:
+There are also two more commands, same plain-chat style:
 
 ```
-mutate smurfstats
+whoare
+smurfstats
 ```
 
-…which just tells you how many players the server's registry has seen so far.
+- **`whoare`** lists **every other player currently on the server** with their full name history, in one go — no need to whois each person one at a time. (You're skipped — you already know your own aliases.)
+- **`smurfstats`** just tells you how many players the server's registry has seen so far.
+
+All three work in any capitalization, in say or team-chat.
 
 ## What it catches (and what it doesn't)
 
@@ -40,7 +46,7 @@ mutate smurfstats
 
 **Doesn't catch:** someone using a genuinely *different* game key (a second copy of the game, or certain paid spoofer setups). The ID is only as stable as the key behind it. SmurfHunter is honest about this — it's a name-history tool, not magic. In practice, most casual smurfs don't bother with extra keys, so it catches the overwhelming majority.
 
-**Who gets recorded:** players and spectators. Bots are excluded automatically, and so are engine-generated fake "players" (like the demo-recording spectator), so they don't pollute the results.
+**Who gets recorded:** players and spectators. Bots are excluded automatically, and so are engine-generated fake "players" (like the demo-recording spectator and the web admin panel's invisible "WebAdmin" connection), so they don't pollute the results. A real player genuinely named "WebAdmin" would still be recorded normally — the exclusion recognizes the engine's fake connection by its type, not by its name.
 
 ## Your privacy, in plain terms
 
@@ -58,4 +64,4 @@ mutate smurfstats
 
 ## TL;DR
 
-Type `mutate whois <name>` in the console. If that "new guy" has three other names in the registry, you'll know immediately. That's the whole trick — and it's why smurfing on servers running SmurfHunter is basically pointless.
+Type `whois <name>` in chat. If that "new guy" has three other names in the registry, you'll know immediately. Type `whoare` to check the whole server at once. That's the whole trick — and it's why smurfing on servers running SmurfHunter is basically pointless.
