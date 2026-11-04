@@ -99,11 +99,11 @@ var bool bSpokeConfigured;
 
 // ---- v3 federation runtime ----
 var array<SmurfSpoke> FedSpokes;         // outbound peer links, parallel to FederationPeers
-var array<float> FedNextReconnectAt;      // per-peer 30s backoff clock
+var array<float> FedNextReconnectAt;      // per-peer 300s backoff clock (v3.03: 5-min peer auth retry)
 
 function PostBeginPlay()
 {
-    local int i, Scrubbed, FedCount;
+    local int i, Scrubbed, Healed, FedCount;
 
     Super.PostBeginPlay();
     SetTimer(1.0, true);
@@ -112,6 +112,10 @@ function PostBeginPlay()
     // (an ignored record held by any remote node can never re-enter:
     // Register() is the single choke point for every merge source).
     Scrubbed = class'SmurfDB'.static.ScrubIgnored();
+
+    // v3.03: heal duplicate / escape-corrupted aliases (backslash ini
+    // round-trip bug) BEFORE any sync can re-relay the corrupt forms.
+    Healed = class'SmurfDB'.static.ScrubDuplicates();
 
     bSpokeConfigured = (CentralHost != "" && CentralToken != "");
 
@@ -157,20 +161,20 @@ function PostBeginPlay()
 
     FedCount = ActivePeerCount();
     if (FedCount > 0)
-        Log("[SmurfHunter] v3.02 federation active -" @ FedCount @ "peer hub(s)");
+        Log("[SmurfHunter] v3.03 federation active -" @ FedCount @ "peer hub(s)");
     else if (bFederate)
-        Log("[SmurfHunter] v3.02 federation configured but NO usable peers");
+        Log("[SmurfHunter] v3.03 federation configured but NO usable peers");
 
     if (HubListener != None && bSpokeConfigured)
-        Log("[SmurfHunter] v3.02 active - HUB + SPOKE (unusual, but allowed); DB has" @ class'SmurfDB'.static.NumRecords() @ "record(s)");
+        Log("[SmurfHunter] v3.03 active - HUB + SPOKE (unusual, but allowed); DB has" @ class'SmurfDB'.static.NumRecords() @ "record(s)");
     else if (HubListener != None)
-        Log("[SmurfHunter] v3.02 active - CENTRAL HUB mode, TCP" @ CentralPort $ "; DB has" @ class'SmurfDB'.static.NumRecords() @ "record(s)");
+        Log("[SmurfHunter] v3.03 active - CENTRAL HUB mode, TCP" @ CentralPort $ "; DB has" @ class'SmurfDB'.static.NumRecords() @ "record(s)");
     else if (bSpokeConfigured)
-        Log("[SmurfHunter] v3.02 active - spoke mode ->" @ CentralHost $ ":" $ string(CentralPort) $ "; DB has" @ class'SmurfDB'.static.NumRecords() @ "record(s)");
+        Log("[SmurfHunter] v3.03 active - spoke mode ->" @ CentralHost $ ":" $ string(CentralPort) $ "; DB has" @ class'SmurfDB'.static.NumRecords() @ "record(s)");
     else if (FedCount > 0)
-        Log("[SmurfHunter] v3.02 active - FEDERATION node (no listener, no fleet spoke); DB has" @ class'SmurfDB'.static.NumRecords() @ "record(s)");
+        Log("[SmurfHunter] v3.03 active - FEDERATION node (no listener, no fleet spoke); DB has" @ class'SmurfDB'.static.NumRecords() @ "record(s)");
     else
-        Log("[SmurfHunter] v3.02 active - local mode; commands: 'mutate whois <name>' / 'mutate whoare' / 'mutate smurfstats' / 'mutate smurfhelp'; DB has" @ class'SmurfDB'.static.NumRecords() @ "record(s)");
+        Log("[SmurfHunter] v3.03 active - local mode; commands: 'mutate whois <name>' / 'mutate whoare' / 'mutate smurfstats' / 'mutate smurfhelp'; DB has" @ class'SmurfDB'.static.NumRecords() @ "record(s)");
 }
 
 // ------------------------- v1: capture + whois -------------------------
@@ -288,6 +292,19 @@ function RegisterPlayer(PlayerController PC, string Why)
     local string Hash, Alias, Stamp;
     local bool bChanged;
 
+    // v3.03: idle spoke heal. The fleet link carries zero traffic while the
+    // server is idle, so NAT/firewalls can silently reap the TCP session
+    // without Closed() ever firing (half-open black hole until map change).
+    // On a player join after >5 min of link silence, proactively recycle:
+    // Close() -> Closed() -> normal 30s backoff -> reconnect + full SYNC.
+    // Harmless if the link was actually alive - one cheap reconnect cycle.
+    if (Why ~= "join" && Spoke != None && Spoke.IsConnected()
+        && Level.TimeSeconds - Spoke.LastHeardAt > 300.0)
+    {
+        Log("[SmurfHunter] player join after" @ int(Level.TimeSeconds - Spoke.LastHeardAt) @ "s of hub silence - recycling fleet link for a fresh sync");
+        Spoke.Close();
+    }
+
     Hash = PC.GetPlayerIDHash();
     if (Hash == "")
     {
@@ -368,7 +385,7 @@ function SendAllRecordsTo(SmurfHubLink Dest)
         Parts.Length = 0;
         Split(class'SmurfDB'.static.GetAliases(i), ",", Parts);
         for (j = 0; j < Parts.Length; j++)
-            Dest.SendText("REG " $ class'SmurfDB'.static.GetHash(i) $ "," $ Parts[j] $ "," $ class'SmurfDB'.static.GetFirstSeen(i));
+            Dest.SendText("REG " $ class'SmurfDB'.static.GetHash(i) $ "," $ class'SmurfDB'.static.FromStorage(Parts[j]) $ "," $ class'SmurfDB'.static.GetFirstSeen(i));   // v3.03: wire carries the canonical (single-backslash) form
     }
     Dest.SendText("END");
 }
@@ -393,7 +410,7 @@ function SpokeFailed(SmurfSpoke S)
             if (FedSpokes[i] == S)
             {
                 FedSpokes[i] = None;
-                FedNextReconnectAt[i] = Level.TimeSeconds + 30.0;
+                FedNextReconnectAt[i] = Level.TimeSeconds + 300.0;   // v3.03: peer auth retry every 5 min, not 30s
                 bFound = true;
                 break;
             }
@@ -469,7 +486,7 @@ function SyncSweep()
     if (bSpokeConfigured && Spoke == None && Level.TimeSeconds >= NextReconnectAt)
         TryConnectSpoke();
 
-    // federation spokes: same 30s backoff, one per peer entry
+    // federation spokes: 300s backoff (v3.03: 5-min peer auth retry), one per peer entry
     if (bFederate)
     {
         for (i = 0; i < FederationPeers.Length; i++)
@@ -509,7 +526,7 @@ function ReplyRecord(PlayerController Sender, string Hash, optional string Onlin
 {
     local int idx, i, Count;
     local array<string> Parts;
-    local string Line;
+    local string Line, Part;
 
     if (Hash == "")
     {
@@ -535,7 +552,7 @@ function ReplyRecord(PlayerController Sender, string Hash, optional string Onlin
     Split(class'SmurfDB'.static.GetAliases(idx), ",", Parts);
     if (Parts.Length == 1)
     {
-        Sender.ClientMessage("[SmurfHunter] Known as: " $ Parts[0]);
+        Sender.ClientMessage("[SmurfHunter] Known as: " $ class'SmurfDB'.static.FromStorage(Parts[0]));
         return;
     }
 
@@ -543,7 +560,8 @@ function ReplyRecord(PlayerController Sender, string Hash, optional string Onlin
     Count = 0;
     for (i = 0; i < Parts.Length; i++)
     {
-        if (Len(Line) + Len(Parts[i]) > 200)  // wrap long lists across messages
+        Part = class'SmurfDB'.static.FromStorage(Parts[i]);   // v3.03: unescape for display
+        if (Len(Line) + Len(Part) > 200)  // wrap long lists across messages
         {
             Sender.ClientMessage(Line);
             Line = "[SmurfHunter] ";
@@ -551,7 +569,7 @@ function ReplyRecord(PlayerController Sender, string Hash, optional string Onlin
         }
         if (Count > 0)
             Line = Line $ ", ";
-        Line = Line $ Parts[i];
+        Line = Line $ Part;
         Count++;
     }
     if (Count > 0)

@@ -6,7 +6,7 @@ so any server owner can deploy directly or rebuild from source for their engine 
 
 | Mutator | Version | What it does |
 |---|---|---|
-| [SmurfHunter](SmurfHunter/) | v1.2.0 | Alias registry + public `mutate whois`/`whoare`/`smurfstats`/`smurfhelp` console commands - records every name a player's stable CD-key ID has used, with optional multi-server sync and hub-to-hub federation. Server-side only, zero client impact. |
+| [SmurfHunter](SmurfHunter/) | v1.3.0 | Alias registry + public `mutate whois`/`whoare`/`smurfstats`/`smurfhelp` console commands - records every name a player's stable CD-key ID has used, with optional multi-server sync and hub-to-hub federation. Server-side only, zero client impact. |
 
 ## Layout convention
 

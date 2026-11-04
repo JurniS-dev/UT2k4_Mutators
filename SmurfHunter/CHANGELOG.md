@@ -1,5 +1,28 @@
 # Changelog - SmurfHunter
 
+## v1.3.0 (2026-11-04)
+Corresponds to internal build v3.03.
+
+- **Backslash name round-trip bug fixed** - names containing a backslash (clan prefixes etc.) never
+  survived the ini save/load cycle (UE2.5 writes config strings raw but processes backslash escapes
+  on import), so `Register()` re-appended the same alias on every capture and whois accumulated
+  dozens-to-hundreds of duplicate aliases per player. Fixed at the storage boundary:
+  `ToStorage()`/`FromStorage()` escape/unescape, `AliasKey()` backslash-blind matching for every
+  comparison, and `ScrubDuplicates()` - a startup heal that dedupes existing databases in place
+  (one write, only if something changed). Upgrading = replace the `.u` and restart; the live DB
+  heals itself.
+- **Idle spoke heal** - an idle server's sync link can be silently dropped by NAT/firewalls without
+  the mutator ever noticing (half-open black hole until the next map change). On the first player
+  join after >5 minutes of link silence the mutator now recycles the fleet connection
+  (reconnect + full reconciliation). No wire protocol change, no config, no heartbeat traffic.
+- **Federation peer retry interval 30s -> 300s** - a `FederationPeers` entry pointing at an
+  unreachable or rejecting peer hub now retries every 5 minutes instead of every 30 seconds.
+  The fleet spoke (your own hub uplink) keeps the 30s backoff.
+- Verified: compile first-pass clean; DM-Rankin regression zero ScriptWarnings with the `v3.03
+  active` marker; federation E2E re-run 16/16 ALL PASS against this build. `.ucl`/`.int` byte-identical
+  to v1.2.0 (servers only need the new `.u`). See the README verification log and the new
+  "Upgrading from v3.02" section.
+
 ## v1.2.0 (2026-11-02)
 Corresponds to internal build v3.02.
 

@@ -1,7 +1,24 @@
 // ===================================================================
-// SmurfHunter - SmurfDB  (v3)
+// SmurfHunter - SmurfDB  (v3.03)
 // Persistent alias registry: one record per unique CD-key hash with a
 // comma-joined alias list and first-seen stamp.
+//
+// v3.03 BACKSLASH-SAFE STORAGE:
+// UE2.5 writes config strings to the ini RAW, but its ini text parser
+// processes backslash escape sequences on import: "\\" -> "\", and a
+// LONE "\X" loses the backslash entirely ("De\mo`" imports as
+// "Demo`"). Any alias containing a backslash therefore never
+// survived a config round-trip, so HasAlias() never matched the live
+// name again and Register() re-appended the same alias on every capture
+// (one production name accumulated 199 copies). Fix, applied at the storage
+// boundary so every caller stays simple:
+//   - ToStorage():   backslashes doubled before anything enters Records[]
+//   - FromStorage(): pairs collapsed back for display + wire (REG lines)
+//   - AliasKey():    case-insensitive, backslash-blind compare key used by
+//                    HasAlias()/FindByAlias()/IsIgnored(), so both storage
+//                    forms (pre-save doubled / post-import single) compare
+//                    equal and corrupted legacy entries still dedup
+//   - ScrubDuplicates(): startup heal for already-corrupted DBs
 // Storage: <user dir>/System/SmurfDB.ini  (config system = the only
 // read+write file API in UnrealScript). Whole-file rewrite happens ONLY
 // on change. Merge semantics are an idempotent set-union keyed on the
@@ -108,16 +125,78 @@ static function int FindHash(string H)
     return -1;
 }
 
+// v3.03: storage-boundary escapes (see header note). Everything going
+// INTO Records[] passes ToStorage(); everything coming OUT for display
+// or wire passes FromStorage(); every comparison uses AliasKey().
+static function string ToStorage(string S)
+{
+    local string Result, Ch;
+    local int i;
+
+    for (i = 0; i < Len(S); i++)
+    {
+        Ch = Mid(S, i, 1);
+        Result = Result $ Ch;
+        if (Ch == "\\")
+            Result = Result $ "\\";   // double it so the ini parser round-trips it
+    }
+    return Result;
+}
+
+static function string FromStorage(string S)
+{
+    local string Result, Ch;
+    local int i;
+
+    for (i = 0; i < Len(S); i++)
+    {
+        Ch = Mid(S, i, 1);
+        if (Ch == "\\")
+        {
+            Result = Result $ "\\";
+            if (i + 1 < Len(S) && Mid(S, i + 1, 1) == "\\")
+                i++;   // collapse the pair; a lone backslash is kept as-is
+        }
+        else
+            Result = Result $ Ch;
+    }
+    return Result;
+}
+
+// Canonical compare key: sanitized, backslashes stripped, case-folded.
+// Backslash-blind by design - names differing only by backslashes are
+// the same identity for smurf-hunting purposes, and this keeps dedup
+// correct for both in-memory forms (pre-save doubled, post-import single)
+// and for legacy entries whose backslash the parser already ate.
+static function string AliasKey(string S)
+{
+    local string Result, Ch;
+    local int i;
+
+    S = SanitizeName(S);
+    for (i = 0; i < Len(S); i++)
+    {
+        Ch = Mid(S, i, 1);
+        if (Ch != "\\")
+            Result = Result $ Ch;
+    }
+    return Caps(Result);
+}
+
 static function bool HasAlias(string AliasList, string Name)
 {
     local array<string> Parts;
+    local string Key;
     local int i;
     if (AliasList == "" || Name == "")
+        return false;
+    Key = AliasKey(Name);
+    if (Key == "")
         return false;
     Parts.Length = 0;
     Split(AliasList, ",", Parts);
     for (i = 0; i < Parts.Length; i++)
-        if (Parts[i] ~= Name)
+        if (AliasKey(Parts[i]) == Key)
             return true;
     return false;
 }
@@ -143,7 +222,7 @@ static function bool IsIgnored(string H, string AliasList)
         for (i = 0; i < Parts.Length; i++)
         {
             for (j = 0; j < default.IgnoredNames.Length; j++)
-                if (default.IgnoredNames[j] != "" && default.IgnoredNames[j] ~= SanitizeName(Parts[i]))
+                if (default.IgnoredNames[j] != "" && AliasKey(default.IgnoredNames[j]) == AliasKey(Parts[i]))
                     return true;
         }
     }
@@ -182,7 +261,7 @@ static function bool Register(string H, string Name, string Stamp)
     if (idx < 0)
     {
         R.Hash = H;
-        R.Aliases = Name;
+        R.Aliases = ToStorage(Name);   // v3.03: escape at the storage boundary
         R.FirstSeen = Stamp;
         default.Records[default.Records.Length] = R;
         if (!default.bBulkSync)
@@ -192,9 +271,9 @@ static function bool Register(string H, string Name, string Stamp)
     if (!HasAlias(default.Records[idx].Aliases, Name))
     {
         if (default.Records[idx].Aliases == "")
-            default.Records[idx].Aliases = Name;
+            default.Records[idx].Aliases = ToStorage(Name);
         else
-            default.Records[idx].Aliases = default.Records[idx].Aliases $ "," $ Name;
+            default.Records[idx].Aliases = default.Records[idx].Aliases $ "," $ ToStorage(Name);
         if (!default.bBulkSync)
             StaticSaveConfig();
         return true;
@@ -229,6 +308,79 @@ static function int ScrubIgnored()
     return Removed;
 }
 
+// v3.03: startup heal for DBs corrupted by the backslash round-trip bug
+// (dup aliases accumulated per capture). Each record's alias list is
+// deduped through AliasKey(); per duplicate group the most faithful
+// spelling is kept (the one still carrying its backslash); survivors are
+// re-stored through the escaping boundary. One ini write if anything
+// changed. Called once from MutSmurfHunter.PostBeginPlay, after
+// ScrubIgnored(), before any sync runs.
+static function int ScrubDuplicates()
+{
+    local array<string> Parts, Keep, KeepKeys;
+    local string Part, Key, NewList;
+    local int i, j, k, Healed;
+    local bool bFound;
+
+    for (i = 0; i < default.Records.Length; i++)
+    {
+        Parts.Length = 0;
+        Split(default.Records[i].Aliases, ",", Parts);
+        Keep.Length = 0;
+        KeepKeys.Length = 0;
+
+        for (j = 0; j < Parts.Length; j++)
+        {
+            if (Parts[j] == "")
+                continue;
+            Key = AliasKey(Parts[j]);
+            if (Key == "")
+                continue;
+            bFound = false;
+            for (k = 0; k < KeepKeys.Length; k++)
+            {
+                if (KeepKeys[k] == Key)
+                {
+                    bFound = true;
+                    // prefer the spelling that still carries its backslash
+                    if (InStr(Keep[k], "\\") < 0 && InStr(Parts[j], "\\") >= 0)
+                        Keep[k] = Parts[j];
+                    break;
+                }
+            }
+            if (!bFound)
+            {
+                Keep[Keep.Length] = Parts[j];
+                KeepKeys[KeepKeys.Length] = Key;
+            }
+        }
+
+        NewList = "";
+        for (j = 0; j < Keep.Length; j++)
+        {
+            Part = ToStorage(FromStorage(Keep[j]));   // idempotent re-escape
+            if (Part == "")
+                continue;
+            if (NewList != "")
+                NewList = NewList $ ",";
+            NewList = NewList $ Part;
+        }
+
+        if (NewList != default.Records[i].Aliases)
+        {
+            default.Records[i].Aliases = NewList;
+            Healed++;
+        }
+    }
+
+    if (Healed > 0)
+    {
+        StaticSaveConfig();
+        Log("[SmurfHunter] DB scrub: healed" @ Healed @ "record(s) with duplicate or escape-unsafe aliases");
+    }
+    return Healed;
+}
+
 // Enter/leave bulk mode around a BEGIN..END block. EndBulkSync flushes the
 // single ini write for everything merged during the block (also used as a
 // safety flush if a link dies mid-block).
@@ -251,8 +403,9 @@ static function EndBulkSync()
     }
 }
 
-// Case-insensitive partial match over every stored alias (both sides
-// sanitized + Caps()-folded).
+// Case-insensitive partial match over every stored alias. v3.03: both
+// sides go through AliasKey() (backslash-blind) so 'whois Demo' finds
+// 'De\mo`' and vice versa.
 // Returns match count, fills Matches with record indices.
 static function int FindByAlias(string Name, out array<int> Matches)
 {
@@ -261,7 +414,7 @@ static function int FindByAlias(string Name, out array<int> Matches)
     local string Needle;
 
     Matches.Length = 0;
-    Needle = Caps(SanitizeName(Name));
+    Needle = AliasKey(Name);
     if (Needle == "")
         return 0;
 
@@ -270,7 +423,7 @@ static function int FindByAlias(string Name, out array<int> Matches)
         Parts.Length = 0;
         Split(default.Records[i].Aliases, ",", Parts);
         for (j = 0; j < Parts.Length; j++)
-            if (InStr(Caps(Parts[j]), Needle) >= 0)
+            if (InStr(AliasKey(Parts[j]), Needle) >= 0)
             {
                 Matches[Matches.Length] = i;
                 break;

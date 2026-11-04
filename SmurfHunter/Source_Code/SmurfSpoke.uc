@@ -25,6 +25,7 @@ var string MyHost;      // v3: per-instance destination (a mutator may run many 
 var int MyPort;
 var string MyToken;
 var IpAddr HubAddr;
+var float LastHeardAt;   // v3.03: time of last inbound traffic (idle-link / half-open detection)
 
 function bool ConnectTo(MutSmurfHunter M, string Host, int Port, string Token, optional bool bFed)
 {
@@ -99,6 +100,7 @@ event ResolveFailed()
 event Opened()
 {
     class'SmurfDB'.static.EndBulkSync();   // clear any stale bulk flag + flush
+    LastHeardAt = Level.TimeSeconds;       // v3.03: silence clock starts at connect
     if (bFederation)
     {
         Log("[SmurfHunter] fed: connected to peer hub" @ MyHost $ ":" $ string(MyPort) $ ", authenticating...");
@@ -116,6 +118,7 @@ event ReceivedLine(string Line)
 {
     local string Hash, Alias, Stamp, Payload;
 
+    LastHeardAt = Level.TimeSeconds;   // v3.03: any inbound traffic = link alive
     if (Left(Line, 4) ~= "REG ")
     {
         Payload = Mid(Line, 4);
@@ -157,7 +160,10 @@ event ReceivedLine(string Line)
 event Closed()
 {
     class'SmurfDB'.static.EndBulkSync();   // safety flush if the link died mid-block
-    Log("[SmurfHunter]" @ RoleName() $ ": connection lost - will retry in 30s");
+    if (bFederation)
+        Log("[SmurfHunter] fed: connection lost - will retry in 300s");   // v3.03: peer auth retry now 5 min
+    else
+        Log("[SmurfHunter] spoke: connection lost - will retry in 30s");
     if (Mut != None)
         Mut.SpokeFailed(Self);
 }
@@ -175,7 +181,7 @@ function SendLocalRecords()
         Parts.Length = 0;
         Split(class'SmurfDB'.static.GetAliases(i), ",", Parts);
         for (j = 0; j < Parts.Length; j++)
-            SendText("REG " $ class'SmurfDB'.static.GetHash(i) $ "," $ Parts[j] $ "," $ class'SmurfDB'.static.GetFirstSeen(i));
+            SendText("REG " $ class'SmurfDB'.static.GetHash(i) $ "," $ class'SmurfDB'.static.FromStorage(Parts[j]) $ "," $ class'SmurfDB'.static.GetFirstSeen(i));   // v3.03: wire carries the canonical (single-backslash) form
     }
     SendText("END");
     Log("[SmurfHunter]" @ RoleName() $ ": pushed" @ class'SmurfDB'.static.NumRecords() @ "record(s)");

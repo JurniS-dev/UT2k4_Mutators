@@ -20,7 +20,7 @@ That's it. The reply comes straight back to your console — private, never show
 
 - Works with **partial names** — `mutate whois bob` finds "BobTheSlayer".
 - Works with **any capitalization** — `mutate whois`, `MUTATE WHOIS`, `Mutate WhoIs` are all the same.
-- Works on **symbols and weird characters** in names — `Bob,Jr` and `Bob Jr` even find each other.
+- Works on **symbols and weird characters** in names — `Bob,Jr` and `Bob Jr` even find each other, and backslash clan-tag names are stored and matched exactly as typed (fixed in v1.3.0).
 - Works on **connected players and past players alike** — the registry remembers.
 - The reply is **private** — only you see it.
 
@@ -63,6 +63,7 @@ All of them work in any capitalization.
 - **No special rights needed.** Any player can use `mutate whois` and the other commands — no admin login.
 - **Server fleets can share one database.** Multiple servers can sync their registries through a central hub, so a name spotted on one server in the cluster is whois-able from all of them, live. Individual server operators can even link their databases with each other (opt-in, per-partner), so a smurf who hops communities gets recognized anyway. Each server still keeps its own full copy, so everything keeps working even if the network link drops.
 - **Junk entries are ignored.** Server owners can maintain ignore lists so panel-monitor connections and other fake records never enter the database.
+- **Backslash-name storage fixed (v1.3.0).** An engine ini quirk used to re-record names containing a backslash over and over, flooding whois with duplicate aliases; they're now stored once, matched exactly, and existing databases self-heal at startup. Idle servers also refresh their sync connection on the first join after a long quiet period, so lookups stay fresh.
 
 ## TL;DR
 
