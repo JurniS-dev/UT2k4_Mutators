@@ -1,5 +1,18 @@
 # Changelog - SmurfHunter
 
+## v1.4.1 (2026-11-05)
+Corresponds to internal build v3.05.
+
+- **whois searches Main (bugfix for v1.4.0)** — offline `mutate whois <name>` searched only the
+  alias history, so records with a known **Main** but an empty alias list (curated fleet seed rows,
+  single-name players) returned "No records found" until the player physically joined a node —
+  whois only "saw" them after their first join. `FindByAlias()` now also matches each record's Main
+  through the same case-insensitive, backslash-blind `AliasKey()` pipeline, so those records resolve
+  offline. The Main spelling is still never copied into the alias list (no duplication) and is still
+  filtered out of "Also seen as" on display. Exactly one caller changed (whois route 2): capture,
+  dedup, sync, federation and wire behavior are untouched. No config/DB/layout changes — the upgrade
+  is the usual single-file `.u` swap, fully compatible with mixed v3.02–v3.05 fleets.
+
 ## v1.4.0 (2026-11-04)
 Corresponds to internal build v3.04.
 

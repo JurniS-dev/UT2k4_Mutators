@@ -1,7 +1,13 @@
 // ===================================================================
-// SmurfHunter - MutSmurfHunter  (v3.04 - Main identity)
+// SmurfHunter - MutSmurfHunter  (v3.05 - whois searches Main)
 // Registers every connected human player and spectator by CD-key hash plus
 // all their name aliases, and answers public "mutate whois <partial name>".
+//
+// v3.05 (public v1.4.1 - fixes v1.4.0): offline whois (route 2) now matches
+// a record's Main in addition to its alias list, so records with an empty
+// alias list but a known Main resolve offline. Main is still shown once -
+// the display still filters it out of "Also seen as". No config, wire or
+// storage changes.
 //
 // v1 features (unchanged):
 //   - 1-second GRI.PRIArray diff poll: joins, disconnects, renames
@@ -201,20 +207,20 @@ function PostBeginPlay()
 
     FedCount = ActivePeerCount();
     if (FedCount > 0)
-        Log("[SmurfHunter] v3.04 federation active -" @ FedCount @ "peer hub(s)");
+        Log("[SmurfHunter] v3.05 federation active -" @ FedCount @ "peer hub(s)");
     else if (bFederate)
-        Log("[SmurfHunter] v3.04 federation configured but NO usable peers");
+        Log("[SmurfHunter] v3.05 federation configured but NO usable peers");
 
     if (HubListener != None && bSpokeConfigured)
-        Log("[SmurfHunter] v3.04 active - HUB + SPOKE (unusual, but allowed); DB has" @ class'SmurfDB'.static.NumRecords() @ "record(s)");
+        Log("[SmurfHunter] v3.05 active - HUB + SPOKE (unusual, but allowed); DB has" @ class'SmurfDB'.static.NumRecords() @ "record(s)");
     else if (HubListener != None)
-        Log("[SmurfHunter] v3.04 active - CENTRAL HUB mode, TCP" @ CentralPort $ "; DB has" @ class'SmurfDB'.static.NumRecords() @ "record(s)");
+        Log("[SmurfHunter] v3.05 active - CENTRAL HUB mode, TCP" @ CentralPort $ "; DB has" @ class'SmurfDB'.static.NumRecords() @ "record(s)");
     else if (bSpokeConfigured)
-        Log("[SmurfHunter] v3.04 active - spoke mode ->" @ CentralHost $ ":" @ string(CentralPort) $ "; DB has" @ class'SmurfDB'.static.NumRecords() @ "record(s)");
+        Log("[SmurfHunter] v3.05 active - spoke mode ->" @ CentralHost $ ":" @ string(CentralPort) $ "; DB has" @ class'SmurfDB'.static.NumRecords() @ "record(s)");
     else if (FedCount > 0)
-        Log("[SmurfHunter] v3.04 active - FEDERATION node (no listener, no fleet spoke); DB has" @ class'SmurfDB'.static.NumRecords() @ "record(s)");
+        Log("[SmurfHunter] v3.05 active - FEDERATION node (no listener, no fleet spoke); DB has" @ class'SmurfDB'.static.NumRecords() @ "record(s)");
     else
-        Log("[SmurfHunter] v3.04 active - local mode; commands: 'mutate whois <name>' / 'mutate whoare' / 'mutate smurfstats' / 'mutate smurfhelp' (+ 'mutate smurfmainset <name> <password>' when MainAdminPassword is set); DB has" @ class'SmurfDB'.static.NumRecords() @ "record(s)");
+        Log("[SmurfHunter] v3.05 active - local mode; commands: 'mutate whois <name>' / 'mutate whoare' / 'mutate smurfstats' / 'mutate smurfhelp' (+ 'mutate smurfmainset <name> <password>' when MainAdminPassword is set); DB has" @ class'SmurfDB'.static.NumRecords() @ "record(s)");
 }
 
 // ------------------------- v1: capture + whois -------------------------
@@ -776,7 +782,9 @@ function CmdWhoIs(PlayerController Sender, string Arg)
         return;
     }
 
-    // route 2: offline DB search over stored aliases
+    // route 2: offline DB search over Main + stored aliases (v3.05: Main
+    // matches so empty-alias records still resolve; aliases alone matched
+    // before v3.05)
     if (class'SmurfDB'.static.FindByAlias(Arg, Matches) == 0)
     {
         Sender.ClientMessage("[SmurfHunter] No records found for '" $ Arg $ "'");

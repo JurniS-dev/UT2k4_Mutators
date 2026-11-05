@@ -28,6 +28,8 @@ Who you get: if a player matching the name is **on the server right now**, you g
 
 Example output: someone whois-able under `ProGamer` might turn out to also be `xX_Slayer_Xx`, `N00bDestroyer`, and `TotallyNewHere` — one player, four names, caught.
 
+**New in v1.4.1 — whois also searches the Main.** Offline lookups now match a player's **Main** name too, not just their alias history — so a player whose Main is known resolves even if they've never joined your server under that name yet.
+
 **New in v1.4.0 — the Main line.** Every player's record now leads with their **Main**: who the player actually *is*, as confirmed by the server admins, separate from the list of names they've *worn*. The reply now looks like:
 
 ```

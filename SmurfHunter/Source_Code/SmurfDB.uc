@@ -1,7 +1,16 @@
 // ===================================================================
-// SmurfHunter - SmurfDB  (v3.04)
+// SmurfHunter - SmurfDB  (v3.05)
 // Persistent alias registry: one record per unique CD-key hash with a
 // comma-joined alias list and first-seen stamp.
+//
+// v3.05 WHOIS MAIN SEARCH (public v1.4.1 - fixes v1.4.0):
+// FindByAlias() now also matches against each record's Main, so records
+// whose alias list is EMPTY but whose Main is known (curated seed rows,
+// Main-only records) still resolve for offline 'mutate whois <name>'.
+// Exactly one caller (whois route 2), so capture/dedup/sync semantics are
+// untouched. Identity stays in Main, history stays in Aliases - the Main
+// spelling is still never copied into the alias list, and the whois
+// display still filters the Main out of "Also seen as" as before.
 //
 // v3.04 MAIN IDENTITY:
 // Every record grows a Main (who the player IS) alongside the alias
@@ -649,12 +658,16 @@ static function EndBulkSync()
 // Case-insensitive partial match over every stored alias. v3.03: both
 // sides go through AliasKey() (backslash-blind) so 'whois Demo' finds
 // 'De\\mo`' and vice versa.
+// v3.05: Main is searched too, through the SAME AliasKey pipeline. A
+// record whose alias list is empty but whose Main is set (curated seed
+// rows) resolves offline; a Main hit alone never touches the alias
+// list (identity lives in Main, history in Aliases - no duplication).
 // Returns match count, fills Matches with record indices.
 static function int FindByAlias(string Name, out array<int> Matches)
 {
     local array<string> Parts;
     local int i, j;
-    local string Needle;
+    local string Needle, MainKey;
 
     Matches.Length = 0;
     Needle = AliasKey(Name);
@@ -663,6 +676,15 @@ static function int FindByAlias(string Name, out array<int> Matches)
 
     for (i = 0; i < default.Records.Length; i++)
     {
+        // v3.05: Main is the canonical identity - searchable exactly like
+        // an alias. AliasKey strips backslashes, so the storage escaping
+        // (ToStorage) is irrelevant on both sides of the compare.
+        MainKey = AliasKey(default.Records[i].Main);
+        if (MainKey != "" && InStr(MainKey, Needle) >= 0)
+        {
+            Matches[Matches.Length] = i;
+            continue;
+        }
         Parts.Length = 0;
         Split(default.Records[i].Aliases, ",", Parts);
         for (j = 0; j < Parts.Length; j++)
