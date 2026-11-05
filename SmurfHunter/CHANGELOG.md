@@ -1,5 +1,27 @@
 # Changelog - SmurfHunter
 
+## v1.4.2 (2026-11-05)
+Corresponds to internal build v3.06.
+
+- **Console display fix (bugfix for the 19-alias `whois` garble)** — the stock drop-down console word-wraps each message but
+  only advances one row per stored message, so any reply longer than one console row overprinted the next. `whois`/`whoare`
+  alias lists now wrap at one console row (every message ≤ 90 chars), and the "Ambiguous, matching connected players:" line
+  is capped the same way, ending with `(+N more)` when the list doesn't fit. Display-only; data unchanged.
+- **Empty-alias REG guard (log-flood fix)** — records with an empty alias list produced a malformed `REG <hash>,,<stamp>`
+  wire line on every full sync (one per record — ~190 in the production seed), each rejected and logged by every receiver.
+  Guarded on **both** push paths (`SmurfSpoke.SendLocalRecords` and the hub-side `SendAllRecordsTo`). Empty-alias records
+  still don't propagate by design (whois finds them via their Main since v1.4.1); receivers keep their rejection logic.
+- **Durable storage codec (new)** — this engine's ini reader strips raw backslashes from config strings, so names like
+  `Sam\Slash` could never survive a save (they decayed to `SamSlash` moments after each write). Alias and Main values are
+  now stored with `\` as `%5C` (lax URL-style): normal names stay byte-identical in the ini, hand-curation writes `%5C`,
+  and the bundled Tools encode automatically. **Wire protocol unchanged** — REG/MAIN lines always carry the canonical live
+  spelling; mixed v3.02–v3.05 fleets behave identically (whois matching is backslash-blind on both spellings).
+- **Stored-spelling auto-repair (new, durable)** — when a player rejoins carrying a backslash spelling the stored entry
+  lost, that one alias entry is rewritten with the faithful live spelling. Fires at most once per spelling (stable fixpoint),
+  relays as a normal DB change, and — thanks to the codec — now survives saves, reboots and fleet syncs.
+- Ops notes: never hand-edit `SmurfDB.ini` while the server runs (edits are silently clobbered by the next internal save);
+  write `%5C` (uppercase) for backslashes when curating by hand.
+
 ## v1.4.1 (2026-11-05)
 Corresponds to internal build v3.05.
 

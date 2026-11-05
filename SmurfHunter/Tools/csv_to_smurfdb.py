@@ -17,8 +17,14 @@ CSV format: header line 'PLAYER,GAME ID', then 'name,hash' rows.
   Pass a custom label as argv[3] to override (e.g. "before 2026-11-01").
 - Duplicate/odd hash rows are reported, not silently dropped.
 Output ini is written with the same field order as the struct
-(Hash, Aliases, FirstSeen) so it stays diff-friendly against the
-engine's own StaticSaveConfig rewrites.
+(Hash, Aliases, FirstSeen, Main, MainSet, MainOrigin, MainStamp -
+the v1.4.0+ shape) so it stays diff-friendly against the engine's
+own StaticSaveConfig rewrites. Main seeds as the first alias, rev 0.
+
+v1.4.2 (v3.06) STORAGE CODEC: the engine's ini reader strips raw
+backslashes from config strings, so aliases are stored with '\\' as
+%5C (lax URL-style). This tool applies the same codec: names are
+sanitized, then %5C-encoded on write. The engine decodes on load.
 
 IMPORTANT (verified live 2026-11-01 against this engine build):
   - the engine expects the file at <user dir>/System/SmurfDB.ini
@@ -39,6 +45,11 @@ def sanitize(s: str) -> str:
         elif ord(ch) >= 32 and ord(ch) != 34:
             out.append(ch)
     return ("".join(out)).strip(" ")
+
+
+def to_storage(s: str) -> str:
+    """v3.06 codec: raw backslashes cannot survive the engine ini reader."""
+    return s.replace("\\", "%5C")
 
 
 def load_rows(path):
@@ -89,8 +100,11 @@ def main():
     with open(dst, "w", encoding="latin-1", newline="\n") as f:
         f.write("[SmurfHunter.SmurfDB]\n")
         for gid in order:
-            f.write('Records=(Hash="%s",Aliases="%s",FirstSeen="%s")\n'
-                    % (gid, ",".join(records[gid]), label))
+            stored = [to_storage(a) for a in records[gid]]
+            main_val = stored[0] if stored else ""
+            f.write('Records=(Hash="%s",Aliases="%s",FirstSeen="%s",Main="%s",'
+                    'MainSet=0,MainOrigin="",MainStamp="")\n'
+                    % (gid, ",".join(stored), label, main_val))
 
     merged = len(rows) - len(order)
     print(f"OK: {len(rows)} csv rows -> {len(order)} records "

@@ -34,6 +34,16 @@ Encoding note: the ini is read/written as latin-1 (legacy engine byte
 behavior; same choice as csv_to_smurfdb.py). Aliases that cannot be
 represented in latin-1 are reported and skipped - report them to the
 source owner rather than mangling them.
+
+v1.4.2 (v3.06) STORAGE CODEC: the engine's ini reader strips raw
+backslashes from config strings, so the mutator stores '\' as %5C
+(lax URL-style) since v1.4.2. This tool is codec-aware: new aliases are
+encoded with to_storage() on write, existing stored entries are decoded
+for the duplicate check, and dedupe is backslash-blind (same AliasKey
+semantics as the mutator's HasAlias). It parses BOTH record shapes
+(old 3-field and v1.4.0+ 7-field with Main/MainSet/MainOrigin/MainStamp)
+and preserves each existing record's original fields verbatim; new
+records are written in the 7-field form.
 """
 import json
 import re
@@ -41,8 +51,6 @@ import sys
 from datetime import datetime
 
 HEX = set("0123456789abcdef")
-REC_RE = re.compile(
-    r'Records=\(Hash="([^"]*)",Aliases="([^"]*)",FirstSeen="([^"]*)"\)')
 
 
 def sanitize(s: str) -> str:
@@ -53,6 +61,64 @@ def sanitize(s: str) -> str:
         elif ord(ch) >= 32 and ord(ch) != 34:
             out.append(ch)
     return ("".join(out)).strip(" ")
+
+
+def to_storage(s: str) -> str:
+    """v3.06 codec: raw backslashes cannot survive the engine ini reader."""
+    return s.replace("\\", "%5C")
+
+
+def from_storage(s: str) -> str:
+    out, i, n = "", 0, len(s)
+    while i < n:
+        if s[i:i + 3] == "%5C":
+            out += "\\"; i += 3
+        else:
+            out += s[i]; i += 1
+    return out
+
+
+def alias_key(s: str) -> str:
+    """Engine SmurfDB.AliasKey parity: sanitize, decode, strip backslashes, caps."""
+    s = from_storage(sanitize(s))
+    return "".join(ch for ch in s if ch != "\\").upper()
+
+
+def split_fields(inner: str):
+    """Split 'K="v",K2=v2,...' on commas outside quotes."""
+    out, buf, inq = [], "", False
+    for ch in inner:
+        if ch == '"':
+            inq = not inq; buf += ch
+        elif ch == "," and not inq:
+            out.append(buf); buf = ""
+        else:
+            buf += ch
+    if buf:
+        out.append(buf)
+    return out
+
+
+def unquote(v: str) -> str:
+    if len(v) >= 2 and v[0] == '"' and v[-1] == '"':
+        return v[1:-1]
+    return v
+
+
+def parse_record(line: str):
+    """Parse a Records=(...) line of EITHER shape (3-field or 7-field).
+    Returns dict of raw fields, or None."""
+    if not line.startswith("Records=(") or not line.rstrip().endswith(")"):
+        return None
+    inner = line.rstrip()[len("Records=("):-1]
+    fields = {}
+    for f in split_fields(inner):
+        if "=" in f:
+            k, v = f.split("=", 1)
+            fields[k.strip()] = unquote(v)
+    if "Hash" not in fields or "Aliases" not in fields or "FirstSeen" not in fields:
+        return None
+    return fields
 
 
 def valid_hash(h: str) -> bool:
@@ -83,26 +149,28 @@ def main():
     ini_lines = ini_text.splitlines()
 
     # ---- parse existing records, preserving header/other lines verbatim
-    records = {}          # lower(hash) -> {"aliases": [...], "firstseen": str}
+    records = {}          # lower(hash) -> {"aliases": [...], "firstseen": str,
+                         #               "raw": original line or None (new)}
     order = []            # lower(hash) in file order
     other_lines = {}      # lineno -> verbatim line (non-Records)
     header_lines = []     # leading [Section] etc. before first Records line
     saw_first_record = False
     for lineno, line in enumerate(ini_lines):
-        m = REC_RE.search(line)
-        if not saw_first_record and not m:
+        fields = parse_record(line)
+        if not saw_first_record and fields is None:
             header_lines.append((lineno, line))
             continue
-        if m:
+        if fields is not None:
             saw_first_record = True
-            h = m.group(1).lower()
+            h = fields["Hash"].lower()
             if h in records:
                 print(f"  !! duplicate record for hash {h} in {src_ini} "
                       f"(line {lineno + 1}) - merged into the first one")
             else:
                 records[h] = {
-                    "aliases": [a for a in m.group(2).split(",") if a != ""],
-                    "firstseen": m.group(3),
+                    "aliases": [a for a in fields["Aliases"].split(",") if a != ""],
+                    "firstseen": fields["FirstSeen"],
+                    "raw": line,
                 }
                 order.append(h)
         else:
@@ -123,12 +191,12 @@ def main():
             skipped_report.append(f"invalid hash key {key!r} -> whole entry skipped")
             continue
         if h not in records:
-            records[h] = {"aliases": [], "firstseen": label}
+            records[h] = {"aliases": [], "firstseen": label, "raw": None}
             order.append(h)
             stats["new_records"] += 1
         else:
             stats["merged_records"] += 1
-        known = {a.lower() for a in records[h]["aliases"]}
+        known = {alias_key(a) for a in records[h]["aliases"]}
         for raw_alias in aliases:
             name = sanitize(str(raw_alias))
             if name == "":
@@ -145,11 +213,12 @@ def main():
                 stats["skipped_alias"] += 1
                 skipped_report.append(f"{h[:8]}…: alias {name!r} not latin-1 representable -> skipped")
                 continue
-            if name.lower() in known:
+            k = alias_key(name)
+            if k in known:
                 stats["aliases_known"] += 1
                 continue
-            known.add(name.lower())
-            records[h]["aliases"].append(name)
+            known.add(k)
+            records[h]["aliases"].append(to_storage(name))   # v3.06 codec on write
             stats["aliases_added"] += 1
 
     # ---- emit (existing record order first, then new records in JSON order)
@@ -159,8 +228,17 @@ def main():
     out = [line for _, line in header_lines]
     for h in order:
         r = records[h]
-        out.append('Records=(Hash="%s",Aliases="%s",FirstSeen="%s")'
-                   % (h, ",".join(r["aliases"]), r["firstseen"]))
+        if r["raw"] is not None:
+            out.append(r["raw"])   # untouched existing record: byte-identical
+            continue
+        if r["aliases"]:
+            main_val = r["aliases"][0]
+            main_set = "0"
+        else:
+            main_val, main_set = "", "0"
+        out.append('Records=(Hash="%s",Aliases="%s",FirstSeen="%s",Main="%s",'
+                   'MainSet=%s,MainOrigin="",MainStamp="")'
+                   % (h, ",".join(r["aliases"]), r["firstseen"], main_val, main_set))
     for lineno in sorted(other_lines):
         out.append(other_lines[lineno])
 

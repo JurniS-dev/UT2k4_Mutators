@@ -1,5 +1,5 @@
 // ===================================================================
-// SmurfHunter - SmurfSpoke  (v3.05)
+// SmurfHunter - SmurfSpoke  (v3.06)
 // Outbound TcpLink client. Two roles:
 //   - ordinary spoke: connects to OUR fleet's central hub (v2 behavior)
 //   - federation mode (v3): connects to a PEER hub; auth carries
@@ -216,7 +216,16 @@ function SendLocalRecords()
         Parts.Length = 0;
         Split(class'SmurfDB'.static.GetAliases(i), ",", Parts);
         for (j = 0; j < Parts.Length; j++)
+        {
+            // v3.06: Split('',',') yields ONE empty part for an empty alias
+            // list - never emit the malformed "REG hash,,stamp" line (every
+            // hub rejected one per record and flooded the log on every full
+            // sync; failure_log 31). Empty-alias records don't propagate by
+            // design - whois finds them via Main since v1.4.1.
+            if (Parts[j] == "")
+                continue;
             SendText("REG " $ class'SmurfDB'.static.GetHash(i) $ "," $ class'SmurfDB'.static.FromStorage(Parts[j]) $ "," $ class'SmurfDB'.static.GetFirstSeen(i));   // v3.03: wire carries the canonical (single-backslash) form
+        }
     }
     for (i = 0; i < class'SmurfDB'.static.NumRecords(); i++)
     {

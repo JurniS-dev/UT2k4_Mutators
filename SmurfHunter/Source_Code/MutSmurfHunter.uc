@@ -1,7 +1,24 @@
 // ===================================================================
-// SmurfHunter - MutSmurfHunter  (v3.05 - whois searches Main)
+// SmurfHunter - MutSmurfHunter  (v3.06 - console display + sync hygiene fixes)
 // Registers every connected human player and spectator by CD-key hash plus
 // all their name aliases, and answers public "mutate whois <partial name>".
+//
+// v3.06 (public v1.4.2 - fixes v1.4.1): display + sync hygiene + durable
+// name storage.
+// (1) whois/whoare output wraps alias lists at ~90 chars (one console row)
+//     and caps the ambiguous-match list the same way - stock ExtendedConsole
+//     word-wraps but advances one row per message, so longer lines overlap.
+// (2) Empty-alias REG guard: SmurfSpoke.SendLocalRecords AND the hub-side
+//     SendAllRecordsTo no longer emit the malformed "REG hash,,stamp" line
+//     (each was rejected + logged by every receiver on every full sync).
+// (3) DURABLE STORAGE CODEC (C1, in SmurfDB): the engine's ini reader
+//     strips raw backslashes from config strings, so backslash names never
+//     survived a save. Storage now encodes '\' as %5C (lax URL-style);
+//     comparisons and egress decode. Wire format unchanged; old plain-form
+//     DBs load as-is.
+// (4) Register() auto-repairs a stored alias spelling whose backslashes
+//     were lost when the live name still carries them - DURABLE under (3),
+//     surviving saves, reboots and fleet syncs.
 //
 // v3.05 (public v1.4.1 - fixes v1.4.0): offline whois (route 2) now matches
 // a record's Main in addition to its alias list, so records with an empty
@@ -207,20 +224,20 @@ function PostBeginPlay()
 
     FedCount = ActivePeerCount();
     if (FedCount > 0)
-        Log("[SmurfHunter] v3.05 federation active -" @ FedCount @ "peer hub(s)");
+        Log("[SmurfHunter] v3.06 federation active -" @ FedCount @ "peer hub(s)");
     else if (bFederate)
-        Log("[SmurfHunter] v3.05 federation configured but NO usable peers");
+        Log("[SmurfHunter] v3.06 federation configured but NO usable peers");
 
     if (HubListener != None && bSpokeConfigured)
-        Log("[SmurfHunter] v3.05 active - HUB + SPOKE (unusual, but allowed); DB has" @ class'SmurfDB'.static.NumRecords() @ "record(s)");
+        Log("[SmurfHunter] v3.06 active - HUB + SPOKE (unusual, but allowed); DB has" @ class'SmurfDB'.static.NumRecords() @ "record(s)");
     else if (HubListener != None)
-        Log("[SmurfHunter] v3.05 active - CENTRAL HUB mode, TCP" @ CentralPort $ "; DB has" @ class'SmurfDB'.static.NumRecords() @ "record(s)");
+        Log("[SmurfHunter] v3.06 active - CENTRAL HUB mode, TCP" @ CentralPort $ "; DB has" @ class'SmurfDB'.static.NumRecords() @ "record(s)");
     else if (bSpokeConfigured)
-        Log("[SmurfHunter] v3.05 active - spoke mode ->" @ CentralHost $ ":" @ string(CentralPort) $ "; DB has" @ class'SmurfDB'.static.NumRecords() @ "record(s)");
+        Log("[SmurfHunter] v3.06 active - spoke mode ->" @ CentralHost $ ":" @ string(CentralPort) $ "; DB has" @ class'SmurfDB'.static.NumRecords() @ "record(s)");
     else if (FedCount > 0)
-        Log("[SmurfHunter] v3.05 active - FEDERATION node (no listener, no fleet spoke); DB has" @ class'SmurfDB'.static.NumRecords() @ "record(s)");
+        Log("[SmurfHunter] v3.06 active - FEDERATION node (no listener, no fleet spoke); DB has" @ class'SmurfDB'.static.NumRecords() @ "record(s)");
     else
-        Log("[SmurfHunter] v3.05 active - local mode; commands: 'mutate whois <name>' / 'mutate whoare' / 'mutate smurfstats' / 'mutate smurfhelp' (+ 'mutate smurfmainset <name> <password>' when MainAdminPassword is set); DB has" @ class'SmurfDB'.static.NumRecords() @ "record(s)");
+        Log("[SmurfHunter] v3.06 active - local mode; commands: 'mutate whois <name>' / 'mutate whoare' / 'mutate smurfstats' / 'mutate smurfhelp' (+ 'mutate smurfmainset <name> <password>' when MainAdminPassword is set); DB has" @ class'SmurfDB'.static.NumRecords() @ "record(s)");
 }
 
 // ------------------------- v1: capture + whois -------------------------
@@ -449,7 +466,17 @@ function SendAllRecordsTo(SmurfHubLink Dest)
         Parts.Length = 0;
         Split(class'SmurfDB'.static.GetAliases(i), ",", Parts);
         for (j = 0; j < Parts.Length; j++)
+        {
+            // v3.06: Split('',',') yields ONE empty part for an empty alias
+            // list - never emit the malformed "REG hash,,stamp" line (the
+            // spoke-side twin of SmurfSpoke.SendLocalRecords; every receiver
+            // rejected one per record and flooded the log on every full
+            // sync; failure_log 31). Empty-alias records don't propagate by
+            // design - whois finds them via Main since v1.4.1.
+            if (Parts[j] == "")
+                continue;
             Dest.SendText("REG " $ class'SmurfDB'.static.GetHash(i) $ "," $ class'SmurfDB'.static.FromStorage(Parts[j]) $ "," $ class'SmurfDB'.static.GetFirstSeen(i));   // v3.03: wire carries the canonical (single-backslash) form
+        }
     }
     for (i = 0; i < class'SmurfDB'.static.NumRecords(); i++)
     {
@@ -670,7 +697,7 @@ function ReplyRecord(PlayerController Sender, string Hash, optional string Onlin
     for (i = 0; i < Parts.Length; i++)
     {
         Part = class'SmurfDB'.static.FromStorage(Parts[i]);   // v3.03: unescape for display
-        if (Len(Line) + Len(Part) > 200)  // wrap long lists across messages
+        if (Len(Line) + Len(Part) > 88)   // v3.06: max one console row - stock ExtendedConsole word-wraps but advances one row per message (failure_log 33); 88 + the ', ' separator guarantees <= 90 per message
         {
             Sender.ClientMessage(Line);
             Line = "[SmurfHunter] ";
@@ -718,8 +745,8 @@ function CmdWhoIs(PlayerController Sender, string Arg)
     local PlayerReplicationInfo PRI;
     local PlayerController PC;
     local array<int> Matches;
-    local string LiveName, Line;
-    local int i, Count, HitIndex;
+    local string LiveName, Line, Suffix;
+    local int i, Count, HitIndex, Shown;
 
     if (Sender == None)
         return;
@@ -765,7 +792,10 @@ function CmdWhoIs(PlayerController Sender, string Arg)
     }
     if (Count > 1)
     {
+        // v3.06: cap the list at one console row (~90 chars) - stock
+        // ExtendedConsole overlaps any message longer than one row
         Line = "[SmurfHunter] Ambiguous, matching connected players:";
+        Shown = 0;
         for (i = 0; i < GRI.PRIArray.Length; i++)
         {
             PRI = GRI.PRIArray[i];
@@ -774,10 +804,23 @@ function CmdWhoIs(PlayerController Sender, string Arg)
                 continue;
             LiveName = class'SmurfDB'.static.SanitizeName(PRI.PlayerName);
             if (LiveName ~= Arg || InStr(Caps(LiveName), Caps(Arg)) >= 0)
+            {
+                if (Len(Line) + Len(PRI.PlayerName) + 3 > 90)
+                    break;   // row budget spent - remaining matches listed as a count
                 Line = Line @ PRI.PlayerName $ " /";
+                Shown++;
+            }
         }
         if (Right(Line, 1) == "/")
             Line = Left(Line, Len(Line) - 1);
+        if (Shown < Count)
+        {
+            Suffix = " (+" $ (Count - Shown) $ " more)";
+            if (Len(Line) + Len(Suffix) > 90)
+                Line = Left(Line, 90 - Len(Suffix)) $ Suffix;
+            else
+                Line = Line $ Suffix;
+        }
         Sender.ClientMessage(Line);
         return;
     }

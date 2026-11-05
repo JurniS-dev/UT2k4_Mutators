@@ -1,7 +1,27 @@
 // ===================================================================
-// SmurfHunter - SmurfDB  (v3.05)
+// SmurfHunter - SmurfDB  (v3.06)
 // Persistent alias registry: one record per unique CD-key hash with a
 // comma-joined alias list and first-seen stamp.
+//
+// v3.06 DURABLE STORAGE CODEC (C1) + AUTO-REPAIR (public v1.4.2):
+// The engine's ini reader strips raw backslashes from config string values
+// (live-probe verified 2026-11-05: stored escaped values decay ~2s after
+// every save, and the file follows on the next write). Backslash names could
+// therefore never persist. Codec changes (all inside this class):
+//   - ToStorage():   '\' -> %5C  (lax URL-style; nothing else is encoded, so
+//     plain names stay byte-identical in the ini).
+//   - FromStorage(): exact-case %5C -> '\' decode.
+//   - AliasKey():    decodes FIRST, so canonical, stored and legacy plain
+//     spellings all compare alike (HasAlias/IsIgnored/FindByAlias/
+//     RemoveAliasKey/ScrubDuplicates inherit this).
+// The wire format is unchanged (canonical names on every REG/MAIN line) and
+// existing plain-form DBs load as-is; only repaired/merged backslash
+// entries carry %5C. Lax trade-off (accepted): a name containing the literal
+// uppercase sequence "%5C" decodes with a backslash.
+// Register()'s no-op branch also auto-repairs a stored spelling whose
+// backslashes were lost when the live name still carries them - durable
+// under the codec, firing at most once per spelling, relaying as a normal
+// DB change.
 //
 // v3.05 WHOIS MAIN SEARCH (public v1.4.1 - fixes v1.4.0):
 // FindByAlias() now also matches against each record's Main, so records
@@ -206,29 +226,29 @@ static function string ToStorage(string S)
     for (i = 0; i < Len(S); i++)
     {
         Ch = Mid(S, i, 1);
-        Result = Result $ Ch;
         if (Ch == "\\")
-            Result = Result $ "\\";   // double it so the ini parser round-trips it
+            Result = Result $ "%5C";   // v3.06 C1 codec: the engine's ini reader strips raw backslashes; %5C survives (live-probe verified 2026-11-05)
+        else
+            Result = Result $ Ch;
     }
     return Result;
 }
 
 static function string FromStorage(string S)
 {
-    local string Result, Ch;
+    local string Result, Tri;
     local int i;
 
     for (i = 0; i < Len(S); i++)
     {
-        Ch = Mid(S, i, 1);
-        if (Ch == "\\")
+        Tri = Mid(S, i, 3);
+        if (Tri == "%5C")   // exact case - the encoder always writes uppercase (lax scheme)
         {
             Result = Result $ "\\";
-            if (i + 1 < Len(S) && Mid(S, i + 1, 1) == "\\")
-                i++;   // collapse the pair; a lone backslash is kept as-is
+            i += 2;   // consume the full 3-char sequence
         }
         else
-            Result = Result $ Ch;
+            Result = Result $ Mid(S, i, 1);
     }
     return Result;
 }
@@ -244,6 +264,7 @@ static function string AliasKey(string S)
     local int i;
 
     S = SanitizeName(S);
+    S = FromStorage(S);   // v3.06: stored values carry %5C - decode so canonical, stored and legacy plain spellings all key alike
     for (i = 0; i < Len(S); i++)
     {
         Ch = Mid(S, i, 1);
@@ -308,7 +329,9 @@ static function bool IsIgnored(string H, string AliasList)
 static function bool Register(string H, string Name, string Stamp)
 {
     local PlayerRecord R;
-    local int idx;
+    local int idx, i, j;
+    local array<string> Parts;
+    local string Key, NewList;
 
     if (H == "")
         return false;
@@ -332,7 +355,7 @@ static function bool Register(string H, string Name, string Stamp)
     if (idx < 0)
     {
         R.Hash = H;
-        R.Aliases = ToStorage(Name);   // v3.03: escape at the storage boundary
+        R.Aliases = ToStorage(Name);   // v3.06: %5C codec at the storage boundary
         R.FirstSeen = Stamp;
         R.Main = R.Aliases;            // v3.04: seed Main = first alias (storage form)
         R.MainSet = 0;                 // v3.04: rev 0 = seeded, never admin-set
@@ -352,6 +375,39 @@ static function bool Register(string H, string Name, string Stamp)
         if (!default.bBulkSync)
             StaticSaveConfig();
         return true;
+    }
+
+    // v3.06: stored-spelling auto-repair. The match above is backslash-blind,
+    // so a known player can arrive carrying a spelling whose backslashes were
+    // lost from the stored entry (the engine's ini reader strips raw
+    // backslashes; stored 'SamSlash`' vs live 'Sam\Slash`). If the live name
+    // keeps backslashes the stored spelling lost, rewrite that one stored
+    // entry with the faithful live spelling - DURABLE under the C1 codec
+    // (stored as %5C), so the repair survives saves, reboots and syncs, and
+    // fires at most once per spelling.
+    if (InStr(Name, "\\") >= 0)
+    {
+        Key = AliasKey(Name);
+        Parts.Length = 0;
+        Split(default.Records[idx].Aliases, ",", Parts);
+        for (i = 0; i < Parts.Length; i++)
+        {
+            if (AliasKey(Parts[i]) == Key && InStr(FromStorage(Parts[i]), "\\") < 0)
+            {
+                Parts[i] = ToStorage(Name);
+                NewList = "";
+                for (j = 0; j < Parts.Length; j++)
+                {
+                    if (NewList != "")
+                        NewList = NewList $ ",";
+                    NewList = NewList $ Parts[j];
+                }
+                default.Records[idx].Aliases = NewList;
+                if (!default.bBulkSync)
+                    StaticSaveConfig();
+                return true;
+            }
+        }
     }
     return false;
 }
@@ -417,8 +473,8 @@ static function int ScrubDuplicates()
                 if (KeepKeys[k] == Key)
                 {
                     bFound = true;
-                    // prefer the spelling that still carries its backslash
-                    if (InStr(Keep[k], "\\") < 0 && InStr(Parts[j], "\\") >= 0)
+                    // prefer the spelling that still carries its backslash (%5C in stored form)
+                    if (InStr(Keep[k], "%5C") < 0 && InStr(Parts[j], "%5C") >= 0)
                         Keep[k] = Parts[j];
                     break;
                 }
