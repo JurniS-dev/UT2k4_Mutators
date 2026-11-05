@@ -1,5 +1,5 @@
 // ===================================================================
-// SmurfHunter - SmurfSpoke  (v3)
+// SmurfHunter - SmurfSpoke  (v3.04)
 // Outbound TcpLink client. Two roles:
 //   - ordinary spoke: connects to OUR fleet's central hub (v2 behavior)
 //   - federation mode (v3): connects to a PEER hub; auth carries
@@ -14,6 +14,14 @@
 // A spoke with NO SmurfDB.ini self-seeds: it connects empty, merges the
 // hub's full DB (bulk mode = one ini write for the whole block), and its
 // local file exists from that moment on.
+//
+// v3.04: MAIN lines get the identical treatment to REG - a Main change
+// that survives MergeMain (revision-ordered last-writer-wins, see
+// SmurfDB) is relayed on federation links only (fleet spokes are leaves,
+// same as REG). The full-DB push (PUSH/SYNC) carries one MAIN line per
+// admin-set record (rev >= 1), AFTER the REG lines, so a receiving node
+// that lacks a record entirely has it by the time the record's MAIN
+// arrives. Seeds (rev 0) never travel.
 // ===================================================================
 
 class SmurfSpoke extends TcpLink;
@@ -117,6 +125,8 @@ event Opened()
 event ReceivedLine(string Line)
 {
     local string Hash, Alias, Stamp, Payload;
+    local string Origin, MainName;
+    local int Rev;
 
     LastHeardAt = Level.TimeSeconds;   // v3.03: any inbound traffic = link alive
     if (Left(Line, 4) ~= "REG ")
@@ -141,6 +151,29 @@ event ReceivedLine(string Line)
         }
         else
             Log("[SmurfHunter]" @ RoleName() $ ": rejected malformed record: " $ Left(Payload, 80));
+    }
+    else if (Left(Line, 5) ~= "MAIN ")
+    {
+        Payload = Mid(Line, 5);
+        if (class'SmurfDB'.static.ParseMainPayload(Payload, Hash, Rev, Origin, Stamp, MainName))
+        {
+            if (class'SmurfDB'.static.MergeMain(Hash, MainName, Rev, Origin, Stamp))
+            {
+                if (bFederation)
+                {
+                    // v3.04: a peer's Main changed our DB -> relay to local hub
+                    // links + our OTHER federation links (fleet spokes are
+                    // leaves, identical policy to REG).
+                    Log("[SmurfHunter] fed: Main change from peer hub:" @ MainName $ " (rev" @ Rev $") - relaying");
+                    if (Mut != None)
+                        Mut.RelayFederated("MAIN " $ Hash $ "," $ Rev $ "," $ Origin $ "," $ Stamp $ "," $ MainName, Self);
+                }
+                else
+                    Log("[SmurfHunter] spoke: merged Main change from hub:" @ MainName $ " (rev" @ Rev $")");
+            }
+        }
+        else
+            Log("[SmurfHunter]" @ RoleName() $ ": rejected malformed MAIN: " $ Left(Payload, 80));
     }
     else if (Left(Line, 6) ~= "BEGIN ")
     {
@@ -170,6 +203,8 @@ event Closed()
 
 // Send the complete local DB (hub asked for it via PUSH). Merge on the
 // hub side is the same idempotent union, so duplicates/ordering are fine.
+// v3.04: admin-set Main state (rev >= 1) rides AFTER the alias lines,
+// inside the same BEGIN..END block; seeds (rev 0) stay local.
 function SendLocalRecords()
 {
     local int i, j;
@@ -183,6 +218,11 @@ function SendLocalRecords()
         for (j = 0; j < Parts.Length; j++)
             SendText("REG " $ class'SmurfDB'.static.GetHash(i) $ "," $ class'SmurfDB'.static.FromStorage(Parts[j]) $ "," $ class'SmurfDB'.static.GetFirstSeen(i));   // v3.03: wire carries the canonical (single-backslash) form
     }
+    for (i = 0; i < class'SmurfDB'.static.NumRecords(); i++)
+    {
+        if (class'SmurfDB'.static.GetMainSet(i) > 0)
+            SendText("MAIN " $ class'SmurfDB'.static.GetHash(i) $ "," $ class'SmurfDB'.static.GetMainSet(i) $ "," $ class'SmurfDB'.static.GetMainOrigin(i) $ "," $ class'SmurfDB'.static.GetMainStamp(i) $ "," $ class'SmurfDB'.static.FromStorage(class'SmurfDB'.static.GetMain(i)));
+    }
     SendText("END");
     Log("[SmurfHunter]" @ RoleName() $ ": pushed" @ class'SmurfDB'.static.NumRecords() @ "record(s)");
 }
@@ -193,4 +233,12 @@ function SendLocalRecords()
 function SendRecord(string Hash, string Alias, string Stamp)
 {
     SendText("REG " $ Hash $ "," $ Alias $ "," $ Stamp);
+}
+
+// v3.04: delta push for a locally-administered Main change. Same
+// fire-and-forget outbox model as SendRecord - reconciliation covers a
+// down link. MainName is the canonical (single-backslash) form.
+function SendMainLine(string Hash, string MainName, int Rev, string Origin, string Stamp)
+{
+    SendText("MAIN " $ Hash $ "," $ Rev $ "," $ Origin $ "," $ Stamp $ "," $ MainName);
 }

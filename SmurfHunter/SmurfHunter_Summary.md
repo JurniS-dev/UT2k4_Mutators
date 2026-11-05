@@ -28,6 +28,16 @@ Who you get: if a player matching the name is **on the server right now**, you g
 
 Example output: someone whois-able under `ProGamer` might turn out to also be `xX_Slayer_Xx`, `N00bDestroyer`, and `TotallyNewHere` — one player, four names, caught.
 
+**New in v1.4.0 — the Main line.** Every player's record now leads with their **Main**: who the player actually *is*, as confirmed by the server admins, separate from the list of names they've *worn*. The reply now looks like:
+
+```
+[SmurfHunter] 'newname` is online now - first seen 2026-11-01 11:06
+[SmurfHunter] Main: ProGamer (admin-set 2026-11-04 18:50)
+[SmurfHunter] Also seen as (3): xX_Slayer_Xx, N00bDestroyer, TotallyNewHere
+```
+
+First line = who's in front of you right now. **Main line = who they actually are** (the stamp shows it was confirmed by an admin, and when). Last line = the full alias history minus the Main. If no admin has confirmed a Main yet, the registry's best guess (their oldest known name) is shown unmarked. Admins set the Main with `mutate smurfmainset <player name> <password>` on any synced server — it propagates to the whole cluster automatically.
+
 There are also three more commands, same style:
 
 ```
@@ -64,6 +74,7 @@ All of them work in any capitalization.
 - **Server fleets can share one database.** Multiple servers can sync their registries through a central hub, so a name spotted on one server in the cluster is whois-able from all of them, live. Individual server operators can even link their databases with each other (opt-in, per-partner), so a smurf who hops communities gets recognized anyway. Each server still keeps its own full copy, so everything keeps working even if the network link drops.
 - **Junk entries are ignored.** Server owners can maintain ignore lists so panel-monitor connections and other fake records never enter the database.
 - **Backslash-name storage fixed (v1.3.0).** An engine ini quirk used to re-record names containing a backslash over and over, flooding whois with duplicate aliases; they're now stored once, matched exactly, and existing databases self-heal at startup. Idle servers also refresh their sync connection on the first join after a long quiet period, so lookups stay fresh.
+- **Main identity (v1.4.0).** Server admins can confirm which alias is the player's real identity (`mutate smurfmainset`); it syncs across the whole cluster with conflict-free ordering and shows up as the `Main:` line in every whois. Server owners opt in by setting an admin password in the config — off by default.
 
 ## TL;DR
 

@@ -1,5 +1,5 @@
 // ===================================================================
-// SmurfHunter - MutSmurfHunter  (v3.02 - console-only commands, full-record ambiguity, smurfhelp)
+// SmurfHunter - MutSmurfHunter  (v3.04 - Main identity)
 // Registers every connected human player and spectator by CD-key hash plus
 // all their name aliases, and answers public "mutate whois <partial name>".
 //
@@ -47,23 +47,36 @@
 //     engine-spawned pseudo-player with an UNSTABLE per-session ID hash -
 //     v3.00 registered it as junk records. Exclusion is structural
 //     (class-based), so a REAL player named "WebAdmin" is never affected.
-//     Pair with IgnoredHashes= lines in SmurfDB.ini to purge records
-//     already on disk (startup scrub removes them; the Register() choke
-//     point means no node's copy can re-enter via union merge).
 //   - mutate whoare: every connected player + alias history in one command
 //     (the player running it is skipped).
 //
 // v3.02:
 //   - Chat commands REMOVED (the v3.01 SmurfSayHandler experiment): all
-//     commands are console-only 'mutate <command>' again - no broadcast
-//     handler in the engine chain, and the zero-client-download property
-//     stays guaranteed.
-//   - whois offline ambiguity: every matching game ID now gets its FULL
-//     record block (first-seen + complete alias history), one block per
-//     match, uncapped - instead of the compact first-alias candidate list.
-//     Connected players keep priority: any in-game match answers with
-//     that player's record only.
+//     commands are console-only 'mutate <command>' again.
+//   - whois offline ambiguity: every matching game ID gets its FULL
+//     record block, uncapped.
 //   - mutate smurfhelp: lists every command with a one-line how-to.
+//
+// v3.03: backslash-safe storage round-trip + idle-spoke heal + 300s fed
+//       peer retry (see SmurfDB header).
+//
+// v3.04 MAIN IDENTITY (merge semantics: SmurfDB header):
+//   - config: MainAdminPassword (gate for 'mutate smurfmainset'; EMPTY =
+//     feature disabled, fail-closed; compared EXACTLY, case-sensitive,
+//     never logged, never echoed), ServerID (stable node identity for
+//     MAIN tiebreaks; auto-generated once on first boot if empty or
+//     invalid, then stored - letters/digits/dash, max 32).
+//   - mutate smurfmainset <player name> <password>: the PASSWORD is the
+//     LAST space-delimited token (names may contain spaces); unique
+//     case-insensitive EXACT match against connected humans (players AND
+//     spectators); the player's exact current spelling becomes Main
+//     (rev = current+1, origin = our ServerID) and the change relays
+//     fleet-wide.
+//   - whois/whoare: Main gets its own headline line ("Main: X", plus
+//     "(admin-set <stamp>)" when rev >= 1); the alias list becomes the
+//     filtered "Also seen as (...)".
+//   - relay + full sync carry MAIN lines for rev >= 1 records only;
+//     seeds (rev 0) stay local and never conflict.
 //
 // Empty config = exact v1 local-only behavior, zero network activity.
 // ===================================================================
@@ -86,6 +99,10 @@ struct FederationPeer
 var config bool bFederate;
 var config array<FederationPeer> FederationPeers;
 
+// ---- v3.04 config ----
+var config string MainAdminPassword;   // 'mutate smurfmainset' gate; empty = feature disabled
+var config string ServerID;            // node identity for MAIN merge tiebreaks
+
 // ---- v1 capture state ----
 var array<PlayerReplicationInfo> WatchedPRIs;
 var array<string> WatchedNames;
@@ -103,7 +120,7 @@ var array<float> FedNextReconnectAt;      // per-peer 300s backoff clock (v3.03:
 
 function PostBeginPlay()
 {
-    local int i, Scrubbed, Healed, FedCount;
+    local int i, Scrubbed, Healed, Seeded, FedCount;
 
     Super.PostBeginPlay();
     SetTimer(1.0, true);
@@ -116,6 +133,29 @@ function PostBeginPlay()
     // v3.03: heal duplicate / escape-corrupted aliases (backslash ini
     // round-trip bug) BEFORE any sync can re-relay the corrupt forms.
     Healed = class'SmurfDB'.static.ScrubDuplicates();
+
+    // v3.04: seed a Main for records that have none yet (oldest alias,
+    // rev 0 = local-only seed), before any sync runs.
+    Seeded = class'SmurfDB'.static.SeedMissingMains();
+
+    // v3.04: stable node identity for MAIN merge tiebreaks. Generated once
+    // and persisted on first boot; a hand-set ID must be letters/digits/
+    // dash (max 32) or it is replaced - a broken ID would corrupt every
+    // wire line it rides on. NOTE: if SmurfHunter.ini is not writable
+    // (root-owned), the save silently fails and a fresh ID regenerates
+    // every boot - the log line below makes that visible.
+    if (ServerID == "")
+    {
+        ServerID = GenerateServerID();
+        SaveConfig();
+        Log("[SmurfHunter] ServerID generated:" @ ServerID @ "- stored in SmurfHunter.ini (if a new ID appears every boot, the ini is not writable)");
+    }
+    else if (!class'SmurfDB'.static.SafeServerID(ServerID))
+    {
+        Log("[SmurfHunter] ServerID '" $ ServerID $ "' is invalid (letters/digits/dash, max 32 chars) - generating a valid one");
+        ServerID = GenerateServerID();
+        SaveConfig();
+    }
 
     bSpokeConfigured = (CentralHost != "" && CentralToken != "");
 
@@ -148,7 +188,7 @@ function PostBeginPlay()
             FedSpokes[i] = None;
             FedNextReconnectAt[i] = 0;   // connect on the first timer tick
             if (FederationPeers[i].Host == "" || FederationPeers[i].Token == "")
-                Log("[SmurfHunter] federation: peer[" $ i $ "] has empty Host or Token - entry disabled");
+                Log("[SmurfHunter] federation: peer[" $ i $"] has empty Host or Token - entry disabled");
         }
     }
     else if (FederationPeers.Length > 0)
@@ -161,20 +201,20 @@ function PostBeginPlay()
 
     FedCount = ActivePeerCount();
     if (FedCount > 0)
-        Log("[SmurfHunter] v3.03 federation active -" @ FedCount @ "peer hub(s)");
+        Log("[SmurfHunter] v3.04 federation active -" @ FedCount @ "peer hub(s)");
     else if (bFederate)
-        Log("[SmurfHunter] v3.03 federation configured but NO usable peers");
+        Log("[SmurfHunter] v3.04 federation configured but NO usable peers");
 
     if (HubListener != None && bSpokeConfigured)
-        Log("[SmurfHunter] v3.03 active - HUB + SPOKE (unusual, but allowed); DB has" @ class'SmurfDB'.static.NumRecords() @ "record(s)");
+        Log("[SmurfHunter] v3.04 active - HUB + SPOKE (unusual, but allowed); DB has" @ class'SmurfDB'.static.NumRecords() @ "record(s)");
     else if (HubListener != None)
-        Log("[SmurfHunter] v3.03 active - CENTRAL HUB mode, TCP" @ CentralPort $ "; DB has" @ class'SmurfDB'.static.NumRecords() @ "record(s)");
+        Log("[SmurfHunter] v3.04 active - CENTRAL HUB mode, TCP" @ CentralPort $ "; DB has" @ class'SmurfDB'.static.NumRecords() @ "record(s)");
     else if (bSpokeConfigured)
-        Log("[SmurfHunter] v3.03 active - spoke mode ->" @ CentralHost $ ":" $ string(CentralPort) $ "; DB has" @ class'SmurfDB'.static.NumRecords() @ "record(s)");
+        Log("[SmurfHunter] v3.04 active - spoke mode ->" @ CentralHost $ ":" @ string(CentralPort) $ "; DB has" @ class'SmurfDB'.static.NumRecords() @ "record(s)");
     else if (FedCount > 0)
-        Log("[SmurfHunter] v3.03 active - FEDERATION node (no listener, no fleet spoke); DB has" @ class'SmurfDB'.static.NumRecords() @ "record(s)");
+        Log("[SmurfHunter] v3.04 active - FEDERATION node (no listener, no fleet spoke); DB has" @ class'SmurfDB'.static.NumRecords() @ "record(s)");
     else
-        Log("[SmurfHunter] v3.03 active - local mode; commands: 'mutate whois <name>' / 'mutate whoare' / 'mutate smurfstats' / 'mutate smurfhelp'; DB has" @ class'SmurfDB'.static.NumRecords() @ "record(s)");
+        Log("[SmurfHunter] v3.04 active - local mode; commands: 'mutate whois <name>' / 'mutate whoare' / 'mutate smurfstats' / 'mutate smurfhelp' (+ 'mutate smurfmainset <name> <password>' when MainAdminPassword is set); DB has" @ class'SmurfDB'.static.NumRecords() @ "record(s)");
 }
 
 // ------------------------- v1: capture + whois -------------------------
@@ -322,7 +362,7 @@ function RegisterPlayer(PlayerController PC, string Why)
         Log("[SmurfHunter]" @ Why @ PC.PlayerReplicationInfo.PlayerName @ "-> DB updated, now" @ class'SmurfDB'.static.NumRecords() @ "record(s)");
     }
     else
-        Log("[SmurfHunter]" @ Why @ PC.PlayerReplicationInfo.PlayerName @ "(already known or ignored, no write)");
+        Log("[SmurfHunter]" @ Why @ PC.PlayerReplicationInfo.PlayerName $ "(already known or ignored, no write)");
 }
 
 // ----------------------------- sync -------------------------------
@@ -339,6 +379,20 @@ function BroadcastRecord(string Hash, string Alias, string Stamp)
         RelayFederated(Line, None);
     if (Spoke != None && Spoke.IsConnected())
         Spoke.SendRecord(Hash, Alias, Stamp);
+}
+
+// v3.04: local Main changed (admin) -> tell the world. Same fire-and-forget
+// outbox model as BroadcastRecord: reconciliation covers missed links.
+// MainName is the canonical (single-backslash, sanitized) form.
+function BroadcastMain(string Hash, string MainName, int Rev, string Origin, string Stamp)
+{
+    local string Line;
+
+    Line = "MAIN " $ Hash $ "," $ Rev $ "," $ Origin $ "," $ Stamp $ "," $ MainName;
+    if (HubListener != None || (bFederate && ActivePeerCount() > 0))
+        RelayFederated(Line, None);
+    if (Spoke != None && Spoke.IsConnected())
+        Spoke.SendMainLine(Hash, MainName, Rev, Origin, Stamp);
 }
 
 // ---- hub-side registry of live links ----
@@ -358,8 +412,9 @@ function UnregisterLink(SmurfHubLink L)
 // Relay a validated line to every link EXCEPT Source (None = local origin,
 // so everyone gets it): inbound spoke links, inbound federation peer
 // links, AND our own outbound federation spokes. Relay fires ONLY on DB
-// change (callers check Register()), which is what makes mesh cycles die
-// at the first already-known hop - loops are structurally impossible.
+// change (callers check Register()/MergeMain()), which is what makes mesh
+// cycles die at the first already-known hop - loops are structurally
+// impossible.
 function RelayFederated(string Line, Actor Source)
 {
     local int i;
@@ -374,6 +429,9 @@ function RelayFederated(string Line, Actor Source)
 }
 
 // Hub sends its complete DB to a requesting link (SYNC / reconciliation).
+// v3.04: admin-set Main state (rev >= 1) rides AFTER the alias lines inside
+// the same block, so a node lacking a record entirely has it by the time
+// the record's MAIN arrives. Seeds (rev 0) stay local.
 function SendAllRecordsTo(SmurfHubLink Dest)
 {
     local int i, j;
@@ -386,6 +444,11 @@ function SendAllRecordsTo(SmurfHubLink Dest)
         Split(class'SmurfDB'.static.GetAliases(i), ",", Parts);
         for (j = 0; j < Parts.Length; j++)
             Dest.SendText("REG " $ class'SmurfDB'.static.GetHash(i) $ "," $ class'SmurfDB'.static.FromStorage(Parts[j]) $ "," $ class'SmurfDB'.static.GetFirstSeen(i));   // v3.03: wire carries the canonical (single-backslash) form
+    }
+    for (i = 0; i < class'SmurfDB'.static.NumRecords(); i++)
+    {
+        if (class'SmurfDB'.static.GetMainSet(i) > 0)
+            Dest.SendText("MAIN " $ class'SmurfDB'.static.GetHash(i) $ "," $ class'SmurfDB'.static.GetMainSet(i) $ "," $ class'SmurfDB'.static.GetMainOrigin(i) $ "," $ class'SmurfDB'.static.GetMainStamp(i) $ "," $ class'SmurfDB'.static.FromStorage(class'SmurfDB'.static.GetMain(i)));
     }
     Dest.SendText("END");
 }
@@ -526,7 +589,7 @@ function ReplyRecord(PlayerController Sender, string Hash, optional string Onlin
 {
     local int idx, i, Count;
     local array<string> Parts;
-    local string Line, Part;
+    local string Line, Part, MainDisp;
 
     if (Hash == "")
     {
@@ -548,15 +611,55 @@ function ReplyRecord(PlayerController Sender, string Hash, optional string Onlin
     else
         Sender.ClientMessage("[SmurfHunter] First seen" @ class'SmurfDB'.static.GetFirstSeen(idx));
 
+    // v3.04: the Main gets its own headline line. rev 0 = seeded (just the
+    // name); rev >= 1 = admin-set (with the display-only stamp).
+    MainDisp = class'SmurfDB'.static.FromStorage(class'SmurfDB'.static.GetMain(idx));
+    if (MainDisp != "")
+    {
+        if (class'SmurfDB'.static.GetMainSet(idx) > 0)
+        {
+            if (class'SmurfDB'.static.GetMainStamp(idx) != "")
+                Sender.ClientMessage("[SmurfHunter] Main: " $ MainDisp $ " (admin-set " $ class'SmurfDB'.static.GetMainStamp(idx) $ ")");
+            else
+                Sender.ClientMessage("[SmurfHunter] Main: " $ MainDisp $ " (admin-set)");
+        }
+        else
+            Sender.ClientMessage("[SmurfHunter] Main: " $ MainDisp);
+    }
+
+    // the alias list is the filtered "everything else": the Main's spelling
+    // is carved out at set time for admin-set Mains; rev-0 seeds keep their
+    // full history on disk, so the display filter does the job here.
     Parts.Length = 0;
     Split(class'SmurfDB'.static.GetAliases(idx), ",", Parts);
+    if (MainDisp != "")
+    {
+        for (i = Parts.Length - 1; i >= 0; i--)
+            if (Parts[i] == "" || class'SmurfDB'.static.AliasKey(Parts[i]) == class'SmurfDB'.static.AliasKey(MainDisp))
+                Parts.Remove(i, 1);
+    }
+    else
+    {
+        for (i = Parts.Length - 1; i >= 0; i--)
+            if (Parts[i] == "")
+                Parts.Remove(i, 1);
+    }
+
+    if (Parts.Length == 0)
+        return;   // Main-only record (or a legacy empty alias list) - nothing else to show
     if (Parts.Length == 1)
     {
-        Sender.ClientMessage("[SmurfHunter] Known as: " $ class'SmurfDB'.static.FromStorage(Parts[0]));
+        if (MainDisp != "")
+            Sender.ClientMessage("[SmurfHunter] Also seen as: " $ class'SmurfDB'.static.FromStorage(Parts[0]));
+        else
+            Sender.ClientMessage("[SmurfHunter] Known as: " $ class'SmurfDB'.static.FromStorage(Parts[0]));
         return;
     }
 
-    Line = "[SmurfHunter] Known as (" $ Parts.Length $ " aliases): ";
+    if (MainDisp != "")
+        Line = "[SmurfHunter] Also seen as (" $ Parts.Length $ "): ";
+    else
+        Line = "[SmurfHunter] Known as (" $ Parts.Length $ " aliases): ";
     Count = 0;
     for (i = 0; i < Parts.Length; i++)
     {
@@ -578,8 +681,9 @@ function ReplyRecord(PlayerController Sender, string Hash, optional string Onlin
 
 function Mutate(string MutateString, PlayerController Sender)
 {
-    // our commands: "whois [name]", "whoare", "smurfstats" and "smurfhelp" -
-    // everything else chains on to the rest of the mutator list.
+    // our commands: "whois [name]", "whoare", "smurfstats", "smurfhelp",
+    // and (v3.04) "smurfmainset <name> <password>" - everything else
+    // chains on to the rest of the mutator list.
     if (MutateString ~= "whois" || Left(MutateString, 6) ~= "whois ")
         CmdWhoIs(Sender, class'SmurfDB'.static.SanitizeName(Mid(MutateString, 5)));
     else if (MutateString ~= "whoare" || Left(MutateString, 7) ~= "whoare ")
@@ -591,6 +695,8 @@ function Mutate(string MutateString, PlayerController Sender)
     }
     else if (MutateString ~= "smurfhelp")
         CmdSmurfHelp(Sender);
+    else if (MutateString ~= "smurfmainset" || Left(MutateString, 13) ~= "smurfmainset ")
+        CmdSmurfMainSet(Sender, Mid(MutateString, 12));
     else
         Super.Mutate(MutateString, Sender);
 }
@@ -734,6 +840,164 @@ function CmdWhoAre(PlayerController Sender)
     }
 }
 
+// v3.04: admin Main setter.
+//   mutate smurfmainset <player name> <password>
+// The PASSWORD is the LAST space-delimited token; the name is everything
+// before it (player names can contain spaces). It is compared EXACTLY
+// (case-sensitive) against MainAdminPassword and is never logged, never
+// echoed. The target must be a connected human (player or spectator,
+// bots excluded) and must match the given name EXACTLY (case-insensitive);
+// on a unique match the player's exact current spelling becomes Main
+// (rev = current+1, origin = this server's ServerID) and the change
+// relays fleet-wide. Refuse, never guess: zero or multiple matches, wrong
+// password, missing record, or no change -> nothing is written.
+function CmdSmurfMainSet(PlayerController Sender, string Args)
+{
+    local GameReplicationInfo GRI;
+    local PlayerReplicationInfo PRI;
+    local PlayerController PC;
+    local array<string> Parts;
+    local string NameArg, Password, MainName, Line, Stamp;
+    local int i, Matches, HitIdx, idx, NewRev;
+
+    if (Sender == None)
+        return;
+
+    while (Left(Args, 1) == " " && Args != "")
+        Args = Mid(Args, 1);
+    while (Right(Args, 1) == " " && Args != "")
+        Args = Left(Args, Len(Args) - 1);
+
+    if (Args == "")
+    {
+        Sender.ClientMessage("[SmurfHunter] Usage: smurfmainset <player name> <password>  (matches connected players/spectators, case-insensitive)");
+        return;
+    }
+    if (MainAdminPassword == "")
+    {
+        Sender.ClientMessage("[SmurfHunter] smurfmainset is disabled on this server (MainAdminPassword empty in SmurfHunter.ini)");
+        return;
+    }
+
+    // last token = password, everything before = player name (names may
+    // contain spaces; a password containing spaces cannot be expressed -
+    // document that)
+    Parts.Length = 0;
+    Split(Args, " ", Parts);
+    if (Parts.Length < 2)
+    {
+        Sender.ClientMessage("[SmurfHunter] Usage: smurfmainset <player name> <password>");
+        return;
+    }
+    Password = Parts[Parts.Length - 1];
+    Parts.Length = Parts.Length - 1;
+    NameArg = "";
+    for (i = 0; i < Parts.Length; i++)
+    {
+        if (Parts[i] == "")
+            continue;
+        if (NameArg != "")
+            NameArg = NameArg $ " ";
+        NameArg = NameArg $ Parts[i];
+    }
+    if (NameArg == "")
+    {
+        Sender.ClientMessage("[SmurfHunter] Usage: smurfmainset <player name> <password>");
+        return;
+    }
+
+    if (Password != MainAdminPassword)   // exact, case-sensitive; NEVER logged
+    {
+        Sender.ClientMessage("[SmurfHunter] Wrong password");
+        return;
+    }
+
+    // unique case-insensitive EXACT match against connected humans
+    // (players AND spectators; bots + engine pseudo-players excluded)
+    GRI = Level.Game.GameReplicationInfo;
+    Matches = 0;
+    HitIdx = -1;
+    if (GRI != None)
+    {
+        for (i = 0; i < GRI.PRIArray.Length; i++)
+        {
+            PRI = GRI.PRIArray[i];
+            PC = GetHumanPC(PRI);
+            if (PC == None)
+                continue;
+            if (class'SmurfDB'.static.SanitizeName(PRI.PlayerName) ~= class'SmurfDB'.static.SanitizeName(NameArg))
+            {
+                Matches++;
+                HitIdx = i;
+            }
+        }
+    }
+    if (Matches == 0)
+    {
+        Sender.ClientMessage("[SmurfHunter] No player named '" $ NameArg $ "' on this server");
+        return;
+    }
+    if (Matches > 1)
+    {
+        Line = "[SmurfHunter] Ambiguous - multiple players match '" $ NameArg $ "':";
+        for (i = 0; i < GRI.PRIArray.Length; i++)
+        {
+            PRI = GRI.PRIArray[i];
+            PC = GetHumanPC(PRI);
+            if (PC == None)
+                continue;
+            if (class'SmurfDB'.static.SanitizeName(PRI.PlayerName) ~= class'SmurfDB'.static.SanitizeName(NameArg))
+                Line = Line @ PRI.PlayerName $ " /";
+        }
+        if (Right(Line, 1) == "/")
+            Line = Left(Line, Len(Line) - 1);
+        Sender.ClientMessage(Line);
+        return;
+    }
+
+    PRI = GRI.PRIArray[HitIdx];
+    PC = GetHumanPC(PRI);
+    MainName = class'SmurfDB'.static.SanitizeName(PRI.PlayerName);   // the server's exact current spelling, ini/wire-safe
+    idx = class'SmurfDB'.static.FindHash(PC.GetPlayerIDHash());
+    if (idx < 0)
+    {
+        Sender.ClientMessage("[SmurfHunter] '" $ PRI.PlayerName $ "' has no stored record yet - try again in a moment");
+        return;
+    }
+
+    Stamp = BuildStamp();
+    NewRev = class'SmurfDB'.static.GetMainSet(idx) + 1;
+    if (!class'SmurfDB'.static.ApplyMainChange(idx, MainName, NewRev, ServerID, Stamp))
+    {
+        Sender.ClientMessage("[SmurfHunter] '" $ MainName $ "' is already the Main for" @ PRI.PlayerName);
+        return;
+    }
+    Log("[SmurfHunter] admin set Main for" @ PRI.PlayerName @ "to '" $ MainName $ "' (rev" @ NewRev $ ")");
+    Sender.ClientMessage("[SmurfHunter] Main set for" @ PRI.PlayerName $ ": " $ MainName $ " (rev" @ NewRev $ ")");
+    BroadcastMain(class'SmurfDB'.static.GetHash(idx), MainName, NewRev, ServerID, Stamp);
+}
+
+// v3.04: random 16-char lowercase hex node ID (64 bits of engine-RNG
+// entropy - collision odds across a fleet are negligible; the RNG is
+// process-seeded so nodes booting in the same second still diverge).
+// Generated ONCE and persisted; stability comes from the ini, not the RNG.
+function string GenerateServerID()
+{
+    local string S;
+    local int i, D;
+
+    S = "";
+    for (i = 0; i < 16; i++)
+    {
+        D = Rand(16);
+        if (D < 10)
+            S = S $ string(D);
+        else
+            S = S $ Chr(D + 87);   // 'a'..'f'
+    }
+    return S;
+}
+
 // smurfhelp core (v3.02): one-line how-to per command, console only.
 function CmdSmurfHelp(PlayerController Sender)
 {
@@ -743,6 +1007,7 @@ function CmdSmurfHelp(PlayerController Sender)
     Sender.ClientMessage("[SmurfHunter] mutate whois <name> - look up a player by name or alias (partial OK)");
     Sender.ClientMessage("[SmurfHunter] mutate whoare - every connected player with their alias history");
     Sender.ClientMessage("[SmurfHunter] mutate smurfstats - how many records the registry holds");
+    Sender.ClientMessage("[SmurfHunter] mutate smurfmainset <name> <password> - admin: set that player's Main identity (relays fleet-wide)");
     Sender.ClientMessage("[SmurfHunter] mutate smurfhelp - this list");
 }
 
@@ -753,4 +1018,6 @@ defaultproperties
     CentralPort=9075
     CentralToken=""
     bFederate=False
+    MainAdminPassword=""
+    ServerID=""
 }

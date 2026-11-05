@@ -1,17 +1,42 @@
 // ===================================================================
-// SmurfHunter - SmurfDB  (v3.03)
+// SmurfHunter - SmurfDB  (v3.04)
 // Persistent alias registry: one record per unique CD-key hash with a
 // comma-joined alias list and first-seen stamp.
+//
+// v3.04 MAIN IDENTITY:
+// Every record grows a Main (who the player IS) alongside the alias
+// history (names they have worn). Merge is deliberately NOT a union:
+// Main is a single mutable value that must converge fleet-wide, and the
+// fleet spans timezones with untrustworthy wall clocks, so ordering uses
+// a Lamport-style revision counter instead of timestamps:
+//   - MainSet: per-record revision. 0 = seeded (oldest alias, never
+//     admin-set). Each admin change takes (highest seen)+1; adopting any
+//     remote revision ratchets the floor, so counters never fork.
+//   - MainOrigin: ServerID of the node that made the change. Equal-rev
+//     conflicts (true concurrent edits) resolve by the IDENTICAL rule on
+//     every node: the lexicographically SMALLER origin wins (case-
+//     sensitive compare). Conflicts are logged, never silent.
+//   - MainStamp: display-only local-time stamp (shown in whois, NEVER
+//     compared - the ordering authority is MainSet/MainOrigin).
+// Seeds never travel: only rev >= 1 Mains are relayed or full-synced.
+// On admin set the retired Main is pushed into the alias list and the
+// new Main's spelling is carved out of it (storage stays canonical);
+// whois display also filters the Main's spelling defensively.
+// Wire: "MAIN <hash>,<rev>,<origin>,<stamp>,<main>" - main rides LAST so
+// it can never reorder fields, and lines are relayed only on change
+// (the same loop-breaker REG uses). MAIN for a hash this node lacks is
+// ignored: the record arrives via the alias union sync and the Main via
+// the next full sync.
 //
 // v3.03 BACKSLASH-SAFE STORAGE:
 // UE2.5 writes config strings to the ini RAW, but its ini text parser
 // processes backslash escape sequences on import: "\\" -> "\", and a
-// LONE "\X" loses the backslash entirely ("De\mo`" imports as
+// LONE "\X" loses the backslash entirely ("De\\mo`" imports as
 // "Demo`"). Any alias containing a backslash therefore never
 // survived a config round-trip, so HasAlias() never matched the live
 // name again and Register() re-appended the same alias on every capture
-// (one production name accumulated 199 copies). Fix, applied at the storage
-// boundary so every caller stays simple:
+// (one production name accumulated 199 copies). Fix, applied at the
+// storage boundary so every caller stays simple:
 //   - ToStorage():   backslashes doubled before anything enters Records[]
 //   - FromStorage(): pairs collapsed back for display + wire (REG lines)
 //   - AliasKey():    case-insensitive, backslash-blind compare key used by
@@ -19,6 +44,8 @@
 //                    forms (pre-save doubled / post-import single) compare
 //                    equal and corrupted legacy entries still dedup
 //   - ScrubDuplicates(): startup heal for already-corrupted DBs
+// The same boundary applies to Main (v3.04): stored escaped, display
+// and wire canonical (single backslash).
 // Storage: <user dir>/System/SmurfDB.ini  (config system = the only
 // read+write file API in UnrealScript). Whole-file rewrite happens ONLY
 // on change. Merge semantics are an idempotent set-union keyed on the
@@ -42,6 +69,10 @@ struct PlayerRecord
     var string Hash;      // PlayerController.GetPlayerIDHash() - stable CD-key GUID hash
     var string Aliases;   // comma-joined unique names (sanitized), oldest first
     var string FirstSeen; // YYYY-MM-DD hh:mm (server local time) or a seed label
+    var string Main;      // v3.04: canonical identity (STORAGE form - ToStorage-escaped)
+    var int    MainSet;   // v3.04: Lamport revision; 0 = seeded, never admin-set
+    var string MainOrigin;// v3.04: ServerID of the node that last set Main ("" while rev 0)
+    var string MainStamp;// v3.04: display-only stamp ("YYYY-MM-DD hh:mm", never compared)
 };
 
 var config array<PlayerRecord> Records;
@@ -112,6 +143,36 @@ static function string GetFirstSeen(int i)
     if (i < 0 || i >= default.Records.Length)
         return "";
     return default.Records[i].FirstSeen;
+}
+
+// v3.04: Main accessors. GetMain returns the STORAGE form (escaped) -
+// display and wire callers pass it through FromStorage().
+static function string GetMain(int i)
+{
+    if (i < 0 || i >= default.Records.Length)
+        return "";
+    return default.Records[i].Main;
+}
+
+static function int GetMainSet(int i)
+{
+    if (i < 0 || i >= default.Records.Length)
+        return 0;
+    return default.Records[i].MainSet;
+}
+
+static function string GetMainOrigin(int i)
+{
+    if (i < 0 || i >= default.Records.Length)
+        return "";
+    return default.Records[i].MainOrigin;
+}
+
+static function string GetMainStamp(int i)
+{
+    if (i < 0 || i >= default.Records.Length)
+        return "";
+    return default.Records[i].MainStamp;
 }
 
 static function int FindHash(string H)
@@ -234,6 +295,7 @@ static function bool IsIgnored(string H, string AliasList)
 // FirstSeen is NEVER overwritten for an existing record (first writer wins).
 // During bulk-sync blocks the ini write is deferred (one flush per block).
 // Ignore-listed identities are rejected here - the single choke point.
+// v3.04: a NEW record's Main starts as its first alias (seed, rev 0).
 static function bool Register(string H, string Name, string Stamp)
 {
     local PlayerRecord R;
@@ -263,6 +325,10 @@ static function bool Register(string H, string Name, string Stamp)
         R.Hash = H;
         R.Aliases = ToStorage(Name);   // v3.03: escape at the storage boundary
         R.FirstSeen = Stamp;
+        R.Main = R.Aliases;            // v3.04: seed Main = first alias (storage form)
+        R.MainSet = 0;                 // v3.04: rev 0 = seeded, never admin-set
+        R.MainOrigin = "";
+        R.MainStamp = "";
         default.Records[default.Records.Length] = R;
         if (!default.bBulkSync)
             StaticSaveConfig();
@@ -381,6 +447,183 @@ static function int ScrubDuplicates()
     return Healed;
 }
 
+// ----------------------- v3.04: Main identity engine -----------------------
+
+// v3.04: rebuild an alias list without every entry whose AliasKey matches
+// Key (used to carve the Main's spelling out of the alias history).
+static function string RemoveAliasKey(string AliasList, string Key)
+{
+    local array<string> Parts;
+    local string NewList;
+    local int i;
+
+    if (AliasList == "" || Key == "")
+        return AliasList;
+    Parts.Length = 0;
+    Split(AliasList, ",", Parts);
+    NewList = "";
+    for (i = 0; i < Parts.Length; i++)
+    {
+        if (Parts[i] == "" || AliasKey(Parts[i]) == Key)
+            continue;
+        if (NewList != "")
+            NewList = NewList $ ",";
+        NewList = NewList $ Parts[i];
+    }
+    return NewList;
+}
+
+// v3.04: ServerID wire/storage safety - letters, digits and dash only,
+// non-empty, max 32 chars (a space or comma would break every CSV wire
+// line the ID rides on; this runs on config load AND on every inbound
+// MAIN line).
+static function bool SafeServerID(string S)
+{
+    local int i;
+    local string C;
+
+    if (S == "" || Len(S) > 32)
+        return false;
+    for (i = 0; i < Len(S); i++)
+    {
+        C = Mid(S, i, 1);
+        if (!((C >= "A" && C <= "Z") || (C >= "a" && C <= "z") || (C >= "0" && C <= "9") || C == "-"))
+            return false;
+    }
+    return true;
+}
+
+// v3.04: core Main mutation, shared by the local admin command (rev =
+// current+1, origin = our ServerID, stamp = now) and the wire merge (the
+// wire's triple verbatim). NewMain arrives SANITIZED + CANONICAL
+// (single-backslash) and is stored through ToStorage.
+// Alias surgery runs ONLY when the identity actually changes (keys
+// differ): the retired Main is pushed into the alias list and the new
+// Main's spelling is carved out of it. A pure respelling (same key, new
+// casing) just updates Main - no list churn, history preserved.
+// Returns true if anything changed (caller relays + the ini is saved,
+// deferred during bulk sync like Register()).
+static function bool ApplyMainChange(int idx, string NewMain, int Rev, string Origin, string Stamp)
+{
+    local string OldMain, OldList, Key, Stored;
+    local bool bChanged;
+
+    if (idx < 0 || idx >= default.Records.Length)
+        return false;
+    NewMain = SanitizeName(NewMain);
+    if (NewMain == "" || Len(NewMain) > 64)
+        return false;
+
+    Stored = ToStorage(NewMain);
+    OldMain = FromStorage(default.Records[idx].Main);
+    Key = AliasKey(NewMain);
+    OldList = default.Records[idx].Aliases;
+
+    if (Key != AliasKey(OldMain))
+    {
+        if (OldMain != "" && !HasAlias(OldList, OldMain))
+        {
+            if (OldList == "")
+                OldList = ToStorage(OldMain);
+            else
+                OldList = OldList $ "," $ ToStorage(OldMain);
+        }
+        OldList = RemoveAliasKey(OldList, Key);
+    }
+
+    if (OldList != default.Records[idx].Aliases)
+    {
+        default.Records[idx].Aliases = OldList;
+        bChanged = true;
+    }
+    if (default.Records[idx].Main != Stored || default.Records[idx].MainSet != Rev
+        || default.Records[idx].MainOrigin != Origin || default.Records[idx].MainStamp != Stamp)
+    {
+        default.Records[idx].Main = Stored;
+        default.Records[idx].MainSet = Rev;
+        default.Records[idx].MainOrigin = Origin;
+        default.Records[idx].MainStamp = Stamp;
+        bChanged = true;
+    }
+
+    if (bChanged && !default.bBulkSync)
+        StaticSaveConfig();
+    return bChanged;
+}
+
+// v3.04: wire merge for MAIN lines - last-writer-wins by Lamport revision
+// with a deterministic origin tiebreak (see header). Rev 0 never travels,
+// so a wire Main is always an admin-set value. Returns true if the DB
+// changed (caller relays). MAIN for a hash we do not have yet is ignored:
+// the record arrives via the alias union sync, the Main via the next full
+// sync (the same reconciliation that heals every other field).
+static function bool MergeMain(string H, string NewMain, int Rev, string Origin, string Stamp)
+{
+    local int idx, CurrRev;
+    local string CurrOrigin;
+
+    if (Rev <= 0)
+        return false;
+    idx = FindHash(H);
+    if (idx < 0)
+    {
+        Log("[SmurfHunter] DB: MAIN for unknown hash" @ Left(H, 8) $ " - ignored (adopted at the next full sync)");
+        return false;
+    }
+
+    CurrRev = default.Records[idx].MainSet;
+    CurrOrigin = default.Records[idx].MainOrigin;
+
+    if (Rev < CurrRev)
+        return false;   // we hold newer state; the peer learns from our full sync
+    if (Rev == CurrRev)
+    {
+        if (Origin == CurrOrigin)
+            return false;   // exact duplicate of what we already hold
+        if (Origin > CurrOrigin)
+        {
+            Log("[SmurfHunter] DB: MAIN conflict on" @ Left(H, 8) $ ": kept origin '" $ CurrOrigin $ "', dropped '" $ Origin $ "' (equal rev" @ CurrRev $")");
+            return false;
+        }
+        Log("[SmurfHunter] DB: MAIN conflict on" @ Left(H, 8) $ ": adopting origin '" $ Origin $ "' over '" $ CurrOrigin $ "' (equal rev" @ CurrRev $")");
+    }
+    return ApplyMainChange(idx, NewMain, Rev, Origin, Stamp);
+}
+
+// v3.04: startup seed - give every record a Main if it has none yet (a
+// fresh v3.04 boot on an older ini). Main = oldest known alias, rev 0 =
+// seeded/never-admin-set: seeds are local-only (never relayed, never
+// merged), so curated and auto-seeded values can never conflict.
+// No alias surgery here on purpose: seeds must not rewrite history; the
+// whois display filters the Main's spelling out of the alias list instead.
+// Records with an empty alias list stay Main-less until an admin sets one.
+static function int SeedMissingMains()
+{
+    local array<string> Parts;
+    local int i, Seeded;
+
+    for (i = 0; i < default.Records.Length; i++)
+    {
+        if (default.Records[i].Main != "" || default.Records[i].Aliases == "")
+            continue;
+        Parts.Length = 0;
+        Split(default.Records[i].Aliases, ",", Parts);
+        if (Parts.Length == 0 || Parts[0] == "")
+            continue;
+        default.Records[i].Main = Parts[0];   // already in storage form
+        default.Records[i].MainSet = 0;
+        default.Records[i].MainOrigin = "";
+        default.Records[i].MainStamp = "";
+        Seeded++;
+    }
+    if (Seeded > 0)
+    {
+        StaticSaveConfig();
+        Log("[SmurfHunter] DB: seeded Main for" @ Seeded @ "record(s) (oldest alias, rev 0)");
+    }
+    return Seeded;
+}
+
 // Enter/leave bulk mode around a BEGIN..END block. EndBulkSync flushes the
 // single ini write for everything merged during the block (also used as a
 // safety flush if a link dies mid-block).
@@ -405,7 +648,7 @@ static function EndBulkSync()
 
 // Case-insensitive partial match over every stored alias. v3.03: both
 // sides go through AliasKey() (backslash-blind) so 'whois Demo' finds
-// 'De\mo`' and vice versa.
+// 'De\\mo`' and vice versa.
 // Returns match count, fills Matches with record indices.
 static function int FindByAlias(string Name, out array<int> Matches)
 {
@@ -435,7 +678,9 @@ static function int FindByAlias(string Name, out array<int> Matches)
 // --------------------- sync: line parsing + input validation -------
 // The wire format is one alias per line:
 //     REG <hash>,<alias>,<stamp>
-// These validators run on EVERY inbound record, whether from a spoke or
+// and (v3.04) one Main state change per line:
+//     MAIN <hash>,<rev>,<origin>,<stamp>,<main>
+// These validators run on EVERY inbound line, whether from a spoke or
 // a peer hub (never trust the socket, even authenticated peers). A rejected
 // line never touches the DB. Validation is layer 3 of the security model
 // (1 = hub firewall allowlist, 2 = tokens, 3 = this).
@@ -494,5 +739,40 @@ static function bool ParseRegPayload(string Payload, out string Hash, out string
         return false;
     Hash = F[0];
     Stamp = F[2];
+    return true;
+}
+
+// v3.04: Payload = '<hash>,<rev>,<origin>,<stamp>,<main>' (everything
+// after 'MAIN '). The main rides LAST so it can never reorder fields
+// (SanitizeName already strips commas today - this is belt and
+// suspenders). Rev must be >= 1 (rev 0 = seed, seeds never travel).
+// Returns true + fills outputs only if the payload is fully valid.
+static function bool ParseMainPayload(string Payload, out string Hash, out int Rev, out string Origin, out string Stamp, out string MainName)
+{
+    local array<string> F;
+    local int i;
+
+    F.Length = 0;
+    Split(Payload, ",", F);
+    if (F.Length < 5)
+        return false;
+    if (!ValidHash(F[0]))
+        return false;
+    Rev = int(F[1]);   // UE2 int() on garbage is 0 -> rejected by the Rev check
+    if (Rev <= 0)
+        return false;
+    if (!SafeServerID(F[2]))
+        return false;
+    if (F[3] != "" && !SafeStamp(F[3]))
+        return false;
+    MainName = F[4];
+    for (i = 5; i < F.Length; i++)   // defensive: rejoin any stray commas
+        MainName = MainName $ "," $ F[i];
+    MainName = SanitizeName(MainName);
+    if (MainName == "" || Len(MainName) > 64)
+        return false;
+    Hash = F[0];
+    Origin = F[2];
+    Stamp = F[3];
     return true;
 }

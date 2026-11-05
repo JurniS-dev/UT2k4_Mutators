@@ -1,5 +1,5 @@
 // ===================================================================
-// SmurfHunter - SmurfHubLink  (v3)
+// SmurfHunter - SmurfHubLink  (v3.04)
 // One instance per inbound connection, spawned by SmurfHubListener
 // (TcpLink.AcceptClass). Handles authentication, input validation,
 // merging, and relaying.
@@ -16,6 +16,14 @@
 // other peers) via RelayFederated - the sender already has it, spokes
 // never relay, and relay fires only on change, so echo/mesh loops are
 // structurally impossible.
+//
+// v3.04: a MAIN that changes the DB (MergeMain = revision-ordered
+// last-writer-wins with a deterministic origin tiebreak, see SmurfDB)
+// gets the identical treatment: merge locally, relay to every other
+// link, rebuilt from the validated fields. An unapplied MAIN is never
+// relayed - the same relay-on-change loop-breaker REG uses. MAIN lines
+// ride AFTER the REG lines inside a full-sync block, so a node that
+// lacks a record entirely has it by the time the record's MAIN arrives.
 // ===================================================================
 
 class SmurfHubLink extends TcpLink;
@@ -73,7 +81,8 @@ function bool PeerIPMatches(int PeerIdx)
 event ReceivedLine(string Line)
 {
     local string Hash, Alias, Stamp, Payload, Rest, Token;
-    local int Idx, PeerIdx;
+    local string Origin, MainName;
+    local int Idx, PeerIdx, Rev;
 
     if (Hub == None)
         return;
@@ -140,6 +149,23 @@ event ReceivedLine(string Line)
         }
         else
             Log("[SmurfHunter] hub: rejected malformed REG from" @ RemoteIP() $ ": " $ Left(Payload, 80));
+    }
+    else if (Left(Line, 5) ~= "MAIN ")
+    {
+        Payload = Mid(Line, 5);
+        if (class'SmurfDB'.static.ParseMainPayload(Payload, Hash, Rev, Origin, Stamp, MainName))
+        {
+            if (class'SmurfDB'.static.MergeMain(Hash, MainName, Rev, Origin, Stamp))
+            {
+                if (bPeerLink)
+                    Log("[SmurfHunter] hub: Main change from peer hub" @ RemoteIP() $ ":" @ MainName $ " (rev" @ Rev $") - relaying");
+                else
+                    Log("[SmurfHunter] hub: Main change from" @ RemoteIP() $ ":" @ MainName $ " (rev" @ Rev $") - relaying");
+                Hub.RelayFederated("MAIN " $ Hash $ "," $ Rev $ "," $ Origin $ "," $ Stamp $ "," $ MainName, Self);
+            }
+        }
+        else
+            Log("[SmurfHunter] hub: rejected malformed MAIN from" @ RemoteIP() $ ": " $ Left(Payload, 80));
     }
     else if (Line ~= "SYNC")
     {

@@ -1,5 +1,41 @@
 # Changelog - SmurfHunter
 
+## v1.4.0 (2026-11-04)
+Corresponds to internal build v3.04.
+
+- **Main identity** - every record now carries a **Main** (who the player IS) alongside the
+  alias history (names they've worn). whois/whoare lead with the Main line:
+  `Main: ProGamer (admin-set 2026-11-04 18:50)` followed by `Also seen as (N): ...` - the alias list
+  is the filtered everything-else, so a smurf is readable at a glance instead of buried in a
+  wall of names. New records seed `Main` from the player's first alias; legacy DBs self-heal
+  at startup (`SeedMissingMains`, one write) - upgrading changes nothing manually.
+- **`mutate smurfmainset <player name> <password>`** - admin command that sets a connected
+  player's Main to their **exact current name** (players and spectators, case-insensitive match;
+  the stored value is the server's live spelling). The retired Main is pushed into the alias
+  history, the new Main's spelling is carved out of it. Password gate: `MainAdminPassword` in
+  `SmurfHunter.ini` - **empty (default) = command disabled** (fail closed); compare is exact and
+  case-sensitive, never logged. Password is the LAST space-delimited token, so names with
+  spaces work naturally.
+- **Fleet-wide convergence without clocks** - Main changes propagate over a new `MAIN` wire
+  line, ordered by a per-record revision counter (Lamport-style) instead of timestamps: each
+  admin change takes highest-seen+1 and stamps the node's `ServerID`; equal-rev conflicts
+  (two admins, disconnected servers) resolve deterministically - smaller `ServerID` wins,
+  logged as `MAIN conflict` on both outcomes. Timezone and clock-skew irrelevant by
+  construction; full-SYNC reconciliation on reconnect heals anything missed. Seeds (rev 0)
+  never travel - no conflict surface at all for auto-seeded data.
+- **`ServerID` config key** - stable node identity for the tiebreak. Optional: empty (default)
+  = a unique random 16-char hex ID is generated once and saved back on first boot. Hand-set
+  values must be letters/digits/dash (max 32) and UNIQUE per node.
+- Wire compatibility: v1.4.0 nodes exchange REG with older peers unchanged; older nodes
+  ignore MAIN lines (never crash) but strip the new ini fields on their own saves - for full
+  Main durability across a mixed fleet, roll the new `.u` to all nodes.
+- Verified: compile first-pass clean; DM-Rankin regression zero ScriptWarnings with the
+  `v3.04 active` marker, `SeedMissingMains` + `ServerID` generation observed live; **wire E2E
+  8/8 against a live hub** (seed-only sync carries no MAIN lines; rev adoption; both tiebreak
+  outcomes; stale rejection; malformed/rev-0/bad-origin/unknown-hash rejection; full-sync
+  echo) plus on-disk alias-surgery verification. `.ucl`/`.int` byte-identical (servers only need
+  the new `.u`).
+
 ## v1.3.0 (2026-11-04)
 Corresponds to internal build v3.03.
 
