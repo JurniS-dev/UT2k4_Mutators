@@ -28,6 +28,8 @@ Who you get: if a player matching the name is **on the server right now**, you g
 
 Example output: someone whois-able under `ProGamer` might turn out to also be `xX_Slayer_Xx`, `N00bDestroyer`, and `TotallyNewHere` — one player, four names, caught.
 
+**New in v1.4.3 — the correct Main on every server.** A player's `Main` (the headline name in `whois`) now matches the central registry on **every** server in the fleet — previously a server that received someone's history via sync could display the wrong headline name (whatever alias it happened to see first, e.g. `Main: blazer` instead of the curated `Main: BlazerOne`). New servers joining the fleet also come online with the complete registry immediately, no manual data drops needed.
+
 **New in v1.4.2 — readable replies and durable names.** Long alias lists now wrap cleanly in the console (no more overlapping text on players with big name histories), and names containing backslashes keep their real spelling permanently — the engine used to silently eat the backslash when saving (`Sam\Slash` became `SamSlash`); it now stores them losslessly and self-heals a player's real spelling the next time they join.
 
 **New in v1.4.1 — whois also searches the Main.** Offline lookups now match a player's **Main** name too, not just their alias history — so a player whose Main is known resolves even if they've never joined your server under that name yet.

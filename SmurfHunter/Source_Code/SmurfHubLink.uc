@@ -1,5 +1,5 @@
 // ===================================================================
-// SmurfHunter - SmurfHubLink  (v3.06)
+// SmurfHunter - SmurfHubLink  (v3.07)
 // One instance per inbound connection, spawned by SmurfHubListener
 // (TcpLink.AcceptClass). Handles authentication, input validation,
 // merging, and relaying.

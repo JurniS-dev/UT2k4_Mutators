@@ -1,7 +1,15 @@
 // ===================================================================
-// SmurfHunter - MutSmurfHunter  (v3.06 - console display + sync hygiene fixes)
+// SmurfHunter - MutSmurfHunter  (v3.07 - Main identity on the wire)
 // Registers every connected human player and spectator by CD-key hash plus
 // all their name aliases, and answers public "mutate whois <partial name>".
+//
+// v3.07 (C2 - Main identity on the wire): the hub's full-sync block now
+// leads EVERY record with a REG line carrying the curated Main spelling,
+// so a node lacking the record creates it with the right Main (Register
+// seeds Main = first alias received) and alias-less Main-only records
+// finally propagate. Spoke/federation binaries unchanged - it is an
+// ordinary REG line, accepted and deduped by every v3.02+ node. Push-back
+// and SendLocalRecords are untouched (no synthesized lines on the uplink).
 //
 // v3.06 (public v1.4.2 - fixes v1.4.1): display + sync hygiene + durable
 // name storage.
@@ -224,20 +232,20 @@ function PostBeginPlay()
 
     FedCount = ActivePeerCount();
     if (FedCount > 0)
-        Log("[SmurfHunter] v3.06 federation active -" @ FedCount @ "peer hub(s)");
+        Log("[SmurfHunter] v3.07 federation active -" @ FedCount @ "peer hub(s)");
     else if (bFederate)
-        Log("[SmurfHunter] v3.06 federation configured but NO usable peers");
+        Log("[SmurfHunter] v3.07 federation configured but NO usable peers");
 
     if (HubListener != None && bSpokeConfigured)
-        Log("[SmurfHunter] v3.06 active - HUB + SPOKE (unusual, but allowed); DB has" @ class'SmurfDB'.static.NumRecords() @ "record(s)");
+        Log("[SmurfHunter] v3.07 active - HUB + SPOKE (unusual, but allowed); DB has" @ class'SmurfDB'.static.NumRecords() @ "record(s)");
     else if (HubListener != None)
-        Log("[SmurfHunter] v3.06 active - CENTRAL HUB mode, TCP" @ CentralPort $ "; DB has" @ class'SmurfDB'.static.NumRecords() @ "record(s)");
+        Log("[SmurfHunter] v3.07 active - CENTRAL HUB mode, TCP" @ CentralPort $ "; DB has" @ class'SmurfDB'.static.NumRecords() @ "record(s)");
     else if (bSpokeConfigured)
-        Log("[SmurfHunter] v3.06 active - spoke mode ->" @ CentralHost $ ":" @ string(CentralPort) $ "; DB has" @ class'SmurfDB'.static.NumRecords() @ "record(s)");
+        Log("[SmurfHunter] v3.07 active - spoke mode ->" @ CentralHost $ ":" @ string(CentralPort) $ "; DB has" @ class'SmurfDB'.static.NumRecords() @ "record(s)");
     else if (FedCount > 0)
-        Log("[SmurfHunter] v3.06 active - FEDERATION node (no listener, no fleet spoke); DB has" @ class'SmurfDB'.static.NumRecords() @ "record(s)");
+        Log("[SmurfHunter] v3.07 active - FEDERATION node (no listener, no fleet spoke); DB has" @ class'SmurfDB'.static.NumRecords() @ "record(s)");
     else
-        Log("[SmurfHunter] v3.06 active - local mode; commands: 'mutate whois <name>' / 'mutate whoare' / 'mutate smurfstats' / 'mutate smurfhelp' (+ 'mutate smurfmainset <name> <password>' when MainAdminPassword is set); DB has" @ class'SmurfDB'.static.NumRecords() @ "record(s)");
+        Log("[SmurfHunter] v3.07 active - local mode; commands: 'mutate whois <name>' / 'mutate whoare' / 'mutate smurfstats' / 'mutate smurfhelp' (+ 'mutate smurfmainset <name> <password>' when MainAdminPassword is set); DB has" @ class'SmurfDB'.static.NumRecords() @ "record(s)");
 }
 
 // ------------------------- v1: capture + whois -------------------------
@@ -454,7 +462,8 @@ function RelayFederated(string Line, Actor Source)
 // Hub sends its complete DB to a requesting link (SYNC / reconciliation).
 // v3.04: admin-set Main state (rev >= 1) rides AFTER the alias lines inside
 // the same block, so a node lacking a record entirely has it by the time
-// the record's MAIN arrives. Seeds (rev 0) stay local.
+// the record's MAIN arrives. A seed's Main SPELLING rides ahead of
+// each record as a REG line (v3.07 C2); rev-0 MAIN state stays local.
 function SendAllRecordsTo(SmurfHubLink Dest)
 {
     local int i, j;
@@ -463,6 +472,18 @@ function SendAllRecordsTo(SmurfHubLink Dest)
     Dest.SendText("BEGIN " $ string(class'SmurfDB'.static.NumRecords()));
     for (i = 0; i < class'SmurfDB'.static.NumRecords(); i++)
     {
+        // v3.07 (C2): the curated Main leads each record on the wire as a
+        // REG line, BEFORE the record's alias lines - a node lacking the
+        // record is created by THIS line, so its seeded Main equals the
+        // hub's curated Main instead of whichever alias happens to arrive
+        // first. It also gives alias-less Main-only records their only wire
+        // representation (they emit zero alias lines below - v3.06's
+        // "don't propagate by design" left them stranded on the hub
+        // forever; failure_log 39). If the Main spelling also rides the
+        // alias list, receivers dedup it via HasAlias (case-insensitive
+        // AliasKey) - a silent no-op, never stored twice, never displayed.
+        if (class'SmurfDB'.static.GetMain(i) != "")
+            Dest.SendText("REG " $ class'SmurfDB'.static.GetHash(i) $ "," $ class'SmurfDB'.static.FromStorage(class'SmurfDB'.static.GetMain(i)) $ "," $ class'SmurfDB'.static.GetFirstSeen(i));
         Parts.Length = 0;
         Split(class'SmurfDB'.static.GetAliases(i), ",", Parts);
         for (j = 0; j < Parts.Length; j++)
@@ -471,8 +492,9 @@ function SendAllRecordsTo(SmurfHubLink Dest)
             // list - never emit the malformed "REG hash,,stamp" line (the
             // spoke-side twin of SmurfSpoke.SendLocalRecords; every receiver
             // rejected one per record and flooded the log on every full
-            // sync; failure_log 31). Empty-alias records don't propagate by
-            // design - whois finds them via Main since v1.4.1.
+            // sync; failure_log 31). Empty-alias records ride the v3.07
+            // Main line above; this guard only suppresses the malformed
+            // empty-part emission.
             if (Parts[j] == "")
                 continue;
             Dest.SendText("REG " $ class'SmurfDB'.static.GetHash(i) $ "," $ class'SmurfDB'.static.FromStorage(Parts[j]) $ "," $ class'SmurfDB'.static.GetFirstSeen(i));   // v3.03: wire carries the canonical (single-backslash) form

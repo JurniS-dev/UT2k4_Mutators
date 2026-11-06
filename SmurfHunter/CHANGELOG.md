@@ -1,5 +1,13 @@
 # Changelog - SmurfHunter
 
+## v1.4.3 (2026-11-06)
+Corresponds to internal build v3.07.
+
+- **Main identity on the wire (sync fix, hub-side only)** — before this build, a node that received a record over sync invented its own Main: the wire carried only per-alias `REG` lines, so a fresh spoke seeded `Main = first alias received` (a player curated as `Main: BlazerOne` showed up on a fresh spoke as `Main: blazer`), and records whose alias list was empty but Main was set had **no wire representation at all** — they never left the hub (a fresh spoke synced 63 of 253 records in the production fleet). The hub's full-sync block now leads **every** record with an ordinary `REG <hash>,<Main>,<stamp>` line, emitted before that record's alias lines — so the receiving node creates the record with the **curated Main** and every record propagates, including alias-less Main-only rows. No data repair needed; receivers dedup a Main spelling that also rides the alias list via the case-insensitive `HasAlias` key (never stored twice, never displayed).
+- **Zero spoke-side changes, fully wire-compatible** — the new line is an ordinary `REG` line accepted and deduped by every v3.02+ binary; mixed fleets work in any order. Roll the `.u` to the **hub first** for the effect; spokes can update at any pace. Push-back (`SendLocalRecords`) is untouched — no synthesized lines on the uplink.
+- **Caveat for spokes that synced before this build**: a node that already seeded a wrong Main keeps it (Main is assigned once at record creation; re-sync only appends aliases). Fix per player with `mutate smurfmainset` (rev 1 propagates fleet-wide and overrides the rev-0 seed), or wipe that spoke's `SmurfDB.ini` once and let it re-sync fresh.
+- Verified against the real binaries: hub egress E2E — `BEGIN 253` block, all 253 records on the wire, first line per record = curated Main + correct `FirstSeen` (253/253), the 190 alias-less records emit exactly one line each, zero malformed lines; fresh-spoke E2E (real hub block replayed to a live spoke with no DB) — **253/253 records, Main identical to the hub's curated Main on every record, FirstSeen preserved 253/253, full alias history merged, 253 pushed back**, zero ScriptWarnings. Harness: `Tools/e2e_c2_hub_capture_client.py` + `Tools/e2e_c2_spoke_replay_hub.py`.
+
 ## v1.4.2 (2026-11-05)
 Corresponds to internal build v3.06.
 

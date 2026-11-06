@@ -1,5 +1,5 @@
 // ===================================================================
-// SmurfHunter - SmurfSpoke  (v3.06)
+// SmurfHunter - SmurfSpoke  (v3.07)
 // Outbound TcpLink client. Two roles:
 //   - ordinary spoke: connects to OUR fleet's central hub (v2 behavior)
 //   - federation mode (v3): connects to a PEER hub; auth carries

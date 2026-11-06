@@ -1,5 +1,5 @@
 // ===================================================================
-// SmurfHunter - SmurfDB  (v3.06)
+// SmurfHunter - SmurfDB  (v3.07)
 // Persistent alias registry: one record per unique CD-key hash with a
 // comma-joined alias list and first-seen stamp.
 //
